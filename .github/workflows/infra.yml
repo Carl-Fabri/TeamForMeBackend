@@ -1,0 +1,275 @@
+# Despliegue de la INFRAESTRUCTURA COMPLETA de TeamForMe en Azure (Container Apps + opcional AKS).
+# Solo se ejecuta a mano (Actions → Run workflow) porque crea recursos. Para actualizar las apps
+# del backend que ya existen, en cada push a master, se usa deploy.yml.
+#
+# Pendiente: el Bicep (cloud/infra/modules/containerapps.bicep) todavía crea su propia app
+# "frontend" con la imagen teamforme/frontend del ACR del backend, que este repositorio no
+# construye. Hasta ajustar el Bicep para apuntar al teamforme-frontend existente, la fase 2
+# se detiene en "Verificar que las imágenes del tag existen".
+#
+#   CI  →  Bicep fase 1  →  9 imágenes a ACR  →  Bicep fase 2  →  smoke test (GO / NO-GO)
+#                                                              ↘  AKS (opcional)
+#
+# Autenticación: OIDC con una identidad administrada (cloud/scripts/github/setup-oidc.ps1).
+# No hay contraseñas de Azure guardadas en GitHub. Solo el job "infra" usa el entorno
+# "production" (ahí se aprueba el despliegue si configuras revisores); el resto de jobs se
+# autentica con la credencial federada de la rama main.
+#
+# Rollback: Actions → "Infra · infraestructura completa" → Run workflow → image_tag = un tag anterior.
+name: Infra · infraestructura completa (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Tag ya publicado en ACR (redeploy o rollback). Vacío = construir uno nuevo."
+        required: false
+        default: ""
+      deploy_aks:
+        description: "Desplegar también el módulo MS.Events en AKS"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write   # necesario para pedir el token OIDC
+
+# Nunca dos despliegues a la vez sobre el mismo entorno; el nuevo espera al anterior.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+env:
+  RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP || 'rg-teamforme' }}
+  LOCATION: ${{ vars.AZURE_LOCATION || 'centralus' }}
+  PREFIX: teamforme
+  DEPLOY_AKS: ${{ inputs.deploy_aks && 'true' || 'false' }}
+
+jobs:
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+
+  infra:
+    name: Bicep · fase 1 (base)
+    needs: ci
+    runs-on: ubuntu-latest
+    environment: production
+    outputs:
+      acr_name: ${{ steps.base.outputs.acr_name }}
+      acr_server: ${{ steps.base.outputs.acr_server }}
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verificar configuración
+        env:
+          CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          INTERNAL_KEY: ${{ secrets.INTERNAL_API_KEY }}
+          GRAFANA_PASS: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
+        run: |
+          missing=0
+          [ -z "$CLIENT_ID" ]    && echo "::error::Falta la variable AZURE_CLIENT_ID (ver cloud/scripts/github/setup-oidc.ps1)" && missing=1
+          [ -z "$INTERNAL_KEY" ] && echo "::error::Falta el secret INTERNAL_API_KEY" && missing=1
+          [ -z "$GRAFANA_PASS" ] && echo "::error::Falta el secret GRAFANA_ADMIN_PASSWORD" && missing=1
+          exit $missing
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID || secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID || secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID || secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Calcular tag de imagen
+        id: tag
+        env:
+          INPUT_TAG: ${{ inputs.image_tag }}
+        run: |
+          if [ -n "$INPUT_TAG" ]; then tag="$INPUT_TAG"; else tag="$(date -u +%Y%m%d%H%M)-${GITHUB_SHA::7}"; fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Tag de esta versión: \`$tag\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Desplegar base (identidad, Key Vault, ACR, Log Analytics)
+        id: base
+        env:
+          TFM_INTERNAL_API_KEY: ${{ secrets.INTERNAL_API_KEY }}
+          TFM_GRAFANA_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
+        run: |
+          if [ "$(az group exists -n "$RESOURCE_GROUP")" != "true" ]; then
+            az group create -n "$RESOURCE_GROUP" -l "$LOCATION" --tags project=teamforme environment=student -o none
+          fi
+          out=$(az deployment group create -g "$RESOURCE_GROUP" -n teamforme-base \
+            -f cloud/infra/main.bicep -p cloud/infra/main.bicepparam \
+            -p deployApps=false prefix="$PREFIX" location="$LOCATION" deployAks="$DEPLOY_AKS" \
+            --query properties.outputs -o json)
+          echo "acr_name=$(jq -r .acrName.value <<<"$out")" >> "$GITHUB_OUTPUT"
+          echo "acr_server=$(jq -r .acrLoginServer.value <<<"$out")" >> "$GITHUB_OUTPUT"
+          echo "Key Vault: \`$(jq -r .keyVaultName.value <<<"$out")\` · ACR: \`$(jq -r .acrLoginServer.value <<<"$out")\`" >> "$GITHUB_STEP_SUMMARY"
+
+  images:
+    name: Imagen · ${{ matrix.name }}
+    needs: infra
+    if: inputs.image_tag == ''
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { name: ms-events,        context: cloud/microservices,            args: "SERVICE=MS.Events" }
+          - { name: ms-teams,         context: cloud/microservices,            args: "SERVICE=MS.Teams" }
+          - { name: ms-applications,  context: cloud/microservices,            args: "SERVICE=MS.Applications" }
+          - { name: ms-users,         context: cloud/microservices,            args: "SERVICE=MS.Users" }
+          - { name: ms-notifications, context: cloud/microservices,            args: "SERVICE=MS.Notifications" }
+          - { name: gateway,          context: cloud/gateway,                  args: "" }
+          - { name: prometheus,       context: cloud/observability/prometheus, args: "" }
+          - { name: grafana,          context: cloud/observability/grafana,    args: "" }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID || secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID || secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID || secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Login en ACR
+        run: az acr login -n "${{ needs.infra.outputs.acr_name }}"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          build-args: |
+            ${{ matrix.args }}
+            APP_VERSION=${{ needs.infra.outputs.tag }}
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ needs.infra.outputs.acr_server }}/teamforme/${{ matrix.name }}:${{ needs.infra.outputs.tag }}
+            ${{ needs.infra.outputs.acr_server }}/teamforme/${{ matrix.name }}:latest
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+
+  apps:
+    name: Bicep · fase 2 (Container Apps)
+    needs: [infra, images]
+    # Corre también cuando "images" se omitió (rollback con image_tag), pero no si falló.
+    if: ${{ !failure() && !cancelled() && needs.infra.result == 'success' }}
+    runs-on: ubuntu-latest
+    outputs:
+      gateway_url: ${{ steps.apps.outputs.gateway_url }}
+      grafana_url: ${{ steps.apps.outputs.grafana_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID || secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID || secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID || secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Verificar que las imágenes del tag existen
+        env:
+          ACR: ${{ needs.infra.outputs.acr_name }}
+          TAG: ${{ needs.infra.outputs.tag }}
+        run: |
+          for img in ms-events ms-teams ms-applications ms-users ms-notifications gateway frontend prometheus grafana; do
+            az acr manifest show-metadata -r "$ACR" -n "teamforme/$img:$TAG" -o none \
+              || { if [ "$img" = frontend ]; then echo "::error::No existe teamforme/frontend:$TAG en $ACR. El frontend se publica desde el repositorio TeamForMe; falta ajustar containerapps.bicep para usar el teamforme-frontend existente."; else echo "::error::No existe teamforme/$img:$TAG en $ACR"; fi; exit 1; }
+          done
+
+      - name: Desplegar Container Apps
+        id: apps
+        env:
+          TFM_INTERNAL_API_KEY: ${{ secrets.INTERNAL_API_KEY }}
+          TFM_GRAFANA_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
+          TAG: ${{ needs.infra.outputs.tag }}
+        run: |
+          out=$(az deployment group create -g "$RESOURCE_GROUP" -n teamforme-apps \
+            -f cloud/infra/main.bicep -p cloud/infra/main.bicepparam \
+            -p deployApps=true imageTag="$TAG" prefix="$PREFIX" location="$LOCATION" deployAks="$DEPLOY_AKS" \
+            --query properties.outputs -o json)
+          gw=$(jq -r .gatewayUrl.value <<<"$out"); gf=$(jq -r .grafanaUrl.value <<<"$out")
+          echo "gateway_url=$gw" >> "$GITHUB_OUTPUT"
+          echo "grafana_url=$gf" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Despliegue"
+            echo "| Componente | URL |"
+            echo "|---|---|"
+            echo "| Aplicación (gateway) | $gw |"
+            echo "| API | $gw/api/events |"
+            echo "| Grafana | $gf |"
+            echo
+            echo "Revisiones activas:"
+            echo '```'
+            az containerapp list -g "$RESOURCE_GROUP" \
+              --query "[].{app:name, revision:properties.latestRevisionName, min:properties.template.scale.minReplicas, max:properties.template.scale.maxReplicas}" -o table
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  smoke:
+    name: Smoke test (GO / NO-GO)
+    needs: apps
+    if: ${{ !failure() && !cancelled() && needs.apps.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Esperar a que el gateway responda
+        env:
+          URL: ${{ needs.apps.outputs.gateway_url }}
+        run: |
+          # Primer arranque: las apps pueden tardar mientras se propaga el RBAC de Key Vault.
+          # Se exige JSON con eventos: un 200 con HTML significaría que respondió el frontend.
+          for i in $(seq 1 30); do
+            body=$(curl -s --max-time 20 "$URL/api/events" || true)
+            if echo "$body" | jq -e 'type == "array" and length > 0' > /dev/null 2>&1; then
+              echo "intento $i: API lista"; exit 0
+            fi
+            echo "intento $i: aún no responde la API"
+            sleep 10
+          done
+          echo "::error::El gateway no respondió 200 en 5 minutos"; exit 1
+
+      - name: Ejecutar smoke-test.ps1
+        shell: pwsh
+        run: |
+          ./cloud/scripts/smoke-test.ps1 -BaseUrl "${{ needs.apps.outputs.gateway_url }}" -ExpectKeyVault -ResolveTimeoutSeconds 60 *>&1 |
+            Tee-Object -FilePath smoke-test.log
+          exit $LASTEXITCODE
+
+      - name: Resumen del smoke test
+        if: always()
+        run: |
+          {
+            echo "### Smoke test"
+            echo '```'
+            sed 's/\x1b\[[0-9;]*m//g' smoke-test.log 2>/dev/null || echo "sin salida"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-test-log
+          path: smoke-test.log
+          if-no-files-found: ignore
+
+  aks:
+    name: AKS · MS.Events
+    needs: [infra, apps]
+    if: ${{ inputs.deploy_aks && !failure() && !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID || secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID || secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID || secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Aplicar overlay AKS
+        shell: pwsh
+        run: ./cloud/scripts/azure/deploy-aks.ps1 -ResourceGroup $env:RESOURCE_GROUP -Prefix $env:PREFIX -ImageTag "${{ needs.infra.outputs.tag }}"

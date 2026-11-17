@@ -17,7 +17,8 @@
   -ConfigureGitHub los carga directamente usando la CLI "gh" (requiere `gh auth login`).
 
 .EXAMPLE
-  ./scripts/github/setup-oidc.ps1 -Repo Carl-Fabri/TeamForMe
+  ./scripts/github/setup-oidc.ps1 -Repo Carl-Fabri/TeamForMeBackend -Branch master   # backend
+  ./scripts/github/setup-oidc.ps1 -Repo Carl-Fabri/TeamForMe -Branch main            # frontend
   ./scripts/github/setup-oidc.ps1 -Repo Carl-Fabri/TeamForMe -Location centralus -ConfigureGitHub
 #>
 param(
@@ -28,6 +29,8 @@ param(
     [string]$Location = "centralus",
     [string]$IdentityName = "id-github-deployer",
     [string]$Environment = "production",
+    # Rama desde la que se despliega (master en TeamForMeBackend, main en TeamForMe).
+    [string]$Branch = "main",
     [switch]$ConfigureGitHub
 )
 
@@ -40,6 +43,12 @@ $account = az account show --query "{id:id, tenant:tenantId, name:name}" -o json
 if (-not $account) { throw "Ejecuta 'az login' primero." }
 Write-Host "$($account.name) ($($account.id))"
 
+# Azure for Students limita las regiones con la política "Allowed resource deployment regions".
+$allowed = az policy assignment list --query "[].parameters.listOfAllowedLocations.value[]" -o tsv
+if ($allowed -and ($allowed -notcontains $Location)) {
+    throw "La región '$Location' no está permitida en esta suscripción. Usa -Location con una de: $($allowed -join ', ')"
+}
+
 Step "Grupo de recursos $ResourceGroup"
 if ((az group exists -n $ResourceGroup) -ne "true") {
     Invoke-Az group create -n $ResourceGroup -l $Location --tags project=teamforme environment=student -o none
@@ -47,9 +56,14 @@ if ((az group exists -n $ResourceGroup) -ne "true") {
 $rgId = az group show -n $ResourceGroup --query id -o tsv
 
 Step "Identidad administrada $IdentityName"
-$identity = az identity show -g $ResourceGroup -n $IdentityName -o json 2>$null | ConvertFrom-Json
+# "list" con filtro devuelve null si no existe, sin escribir en stderr. "show" fallaría con
+# ResourceNotFound y, con ErrorActionPreference=Stop, Windows PowerShell 5.1 corta el script
+# aunque se redirija con 2>$null.
+$identity = az identity list -g $ResourceGroup --query "[?name=='$IdentityName'] | [0]" -o json | ConvertFrom-Json
 if (-not $identity) {
-    $identity = az identity create -g $ResourceGroup -n $IdentityName -o json | ConvertFrom-Json
+    # Región explícita: sin -l se usaría la del grupo de recursos, que puede no estar permitida.
+    $identity = az identity create -g $ResourceGroup -n $IdentityName -l $Location -o json | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0 -or -not $identity) { throw "No se pudo crear la identidad $IdentityName" }
 }
 Write-Host "clientId: $($identity.clientId)"
 
@@ -58,7 +72,20 @@ Write-Host "clientId: $($identity.clientId)"
 $repoSlug = ($Repo -replace '[^A-Za-z0-9-]', '-')
 $subjects = [ordered]@{
     "github-$repoSlug-$Environment" = "repo:${Repo}:environment:${Environment}"
-    "github-$repoSlug-main"         = "repo:${Repo}:ref:refs/heads/main"
+    "github-$repoSlug-$Branch"       = "repo:${Repo}:ref:refs/heads/$Branch"
+}
+
+# GitHub puede emitir el "subject" con IDs inmutables: repo:<owner>@<ownerId>/<repo>@<repoId>:...
+# (evita que alguien recree una cuenta o repo con el mismo nombre). Azure compara el texto exacto,
+# así que se registran ambos formatos. Los IDs se leen de la API pública de GitHub.
+try {
+    $gh = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo" -Headers @{ "User-Agent" = "teamforme-setup" }
+    $owner, $name = $Repo.Split('/')
+    $immutable = "${owner}@$($gh.owner.id)/${name}@$($gh.id)"
+    $subjects["github-$repoSlug-$Environment-ids"] = "repo:${immutable}:environment:${Environment}"
+    $subjects["github-$repoSlug-$Branch-ids"]       = "repo:${immutable}:ref:refs/heads/$Branch"
+} catch {
+    Write-Warning "No se pudieron leer los IDs de $Repo en la API de GitHub (¿repositorio privado?). Solo se registra el formato por nombre."
 }
 foreach ($credName in $subjects.Keys) {
     $subject = $subjects[$credName]
@@ -73,15 +100,21 @@ foreach ($credName in $subjects.Keys) {
 
 Step "Roles sobre $ResourceGroup"
 foreach ($role in "Contributor", "Role Based Access Control Administrator") {
-    $has = az role assignment list --assignee $identity.principalId --scope $rgId --role $role --query "[0].id" -o tsv
+    # Filtro por principalId en vez de --assignee: no consulta Entra ID, que puede no conocer
+    # todavía una identidad recién creada.
+    $has = az role assignment list --scope $rgId --query "[?principalId=='$($identity.principalId)' && roleDefinitionName=='$role'].id | [0]" -o tsv
     if (-not $has) {
-        # La identidad recién creada puede tardar unos segundos en propagarse en Entra ID.
+        # La identidad recién creada puede tardar unos segundos en propagarse en Entra ID, así que
+        # se reintenta; mientras tanto los fallos de az no deben cortar el script.
+        $ErrorActionPreference = "Continue"
         for ($i = 1; $i -le 6; $i++) {
             az role assignment create --assignee-object-id $identity.principalId --assignee-principal-type ServicePrincipal `
-                --role $role --scope $rgId -o none 2>$null
+                --role $role --scope $rgId -o none 2>&1 | Out-Null
             if ($LASTEXITCODE -eq 0) { break }
+            Write-Host "  esperando propagación de la identidad ($i/6)..."
             Start-Sleep -Seconds 10
         }
+        $ErrorActionPreference = "Stop"
         if ($LASTEXITCODE -ne 0) { throw "No se pudo asignar el rol '$role'. ¿Tienes rol Owner en la suscripción?" }
     }
     Write-Host "  $role ✓"

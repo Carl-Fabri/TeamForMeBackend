@@ -1,193 +1,155 @@
 # Despliegue continuo con GitHub Actions
 
-Pipeline que compila, prueba y despliega TeamForMe en Azure en cada push a `main`, sin
-contraseñas de Azure guardadas en GitHub (OIDC).
+TeamForMe vive en **dos repositorios independientes**, cada uno con su propio pipeline. Un push a
+uno despliega solo lo suyo. No hay contraseñas de Azure en GitHub: la autenticación es OIDC con
+la identidad administrada `id-github-deployer`.
 
-| Archivo | Qué hace |
-|---|---|
-| [`.github/workflows/ci.yml`](../../../.github/workflows/ci.yml) | CI en cada PR y en ramas que no son `main`: .NET (build + `dotnet test`), Angular (Vitest + build SSR), Bicep, Kustomize y build de las 9 imágenes sin publicarlas |
-| [`.github/workflows/deploy.yml`](../../../.github/workflows/deploy.yml) | CD en push a `main` o manual: CI → Bicep fase 1 → imágenes a ACR → Bicep fase 2 → smoke test → (AKS opcional) |
-| [`scripts/github/setup-oidc.ps1`](../../../scripts/github/setup-oidc.ps1) | Configuración única: identidad administrada con confianza federada en GitHub + roles + variables y secretos |
-| [`scripts/smoke-test.ps1`](../../../scripts/smoke-test.ps1) | Pruebas GO/NO-GO que el pipeline ejecuta contra el gateway desplegado |
+| Repositorio | Rama | Contenido | Despliega |
+|---|---|---|---|
+| [Carl-Fabri/TeamForMe](https://github.com/Carl-Fabri/TeamForMe) | `main` | Frontend Angular 21 SSR | La Container App `teamforme-frontend` |
+| [Carl-Fabri/TeamForMeBackend](https://github.com/Carl-Fabri/TeamForMeBackend) | `master` | Plantilla gRPC + `cloud/` (microservicios, infra, gateway, observabilidad, k8s, scripts) | Las Container Apps del backend que existan (gateway, ms-*, prometheus, grafana) |
 
-## 1. Flujo del pipeline
+Carpeta de trabajo local (no es un repositorio):
+```text
+C:\laragon\www\TeamForMe\
+├── TeamForMeFrontend\   → Carl-Fabri/TeamForMe
+└── TeamForMeBackend\    → Carl-Fabri/TeamForMeBackend
+```
 
+## 1. Workflows
+
+### Repositorio TeamForMe (frontend)
+| Archivo | Cuándo | Qué hace |
+|---|---|---|
+| `.github/workflows/ci.yml` | PR y ramas ≠ `main` | `npm ci`, Vitest, build SSR e imagen Docker (sin publicar) |
+| `.github/workflows/deploy.yml` | push a `main` (salvo solo `docs/`, `specs/`, `*.md`) o manual | CI → publica la imagen en el registro que ya usa `teamforme-frontend` → `az containerapp update` → espera la revisión → verifica HTTP 200 |
+
+### Repositorio TeamForMeBackend (backend)
+| Archivo | Cuándo | Qué hace |
+|---|---|---|
+| `.github/workflows/ci.yml` | PR y ramas ≠ `master` | Build de la plantilla gRPC, build + `dotnet test` de `cloud/microservices`, Bicep, Kustomize e imágenes del backend (sin publicar) |
+| `.github/workflows/deploy.yml` | push a `master` que toque `cloud/microservices`, `cloud/gateway` o `cloud/observability`, o manual | CI → detecta las Container Apps del backend que **ya existen** → build + push al registro de cada una → update → verificación. Si no existe ninguna, termina sin desplegar |
+| `.github/workflows/infra.yml` | **Solo manual** | Crea o actualiza la infraestructura completa con Bicep (fases 1 y 2) + smoke test + AKS opcional |
+
+> **Pendiente en `infra.yml`:** `cloud/infra/modules/containerapps.bicep` todavía crea su propia app
+> `frontend` con la imagen `teamforme/frontend` del ACR del backend, que este repositorio no
+> construye. Hasta ajustar el Bicep para que el gateway apunte al `teamforme-frontend` existente,
+> la fase 2 se detiene en "Verificar que las imágenes del tag existen", con un mensaje explicativo.
+
+### Flujo de los workflows de despliegue (los dos repositorios)
 ```mermaid
 flowchart LR
-    push[push a main<br/>o Run workflow] --> ci[CI<br/>backend · frontend · infra · imágenes]
-    ci --> infra[Bicep fase 1<br/>entorno production]
-    infra --> img[9 imágenes<br/>build + push a ACR]
-    img --> apps[Bicep fase 2<br/>Container Apps con el tag]
-    infra -. rollback: image_tag .-> apps
-    apps --> smoke{smoke-test.ps1}
-    smoke -->|GO| ok[Producción]
-    smoke -->|NO-GO| fail[Run en rojo<br/>rollback manual]
-    apps -. deploy_aks .-> aks[AKS · MS.Events]
+    push[push a la rama principal] --> ci[CI]
+    ci --> det[Leer o detectar la app<br/>y su imagen actual]
+    det --> b1[build + push<br/>al mismo registro]
+    b1 --> up[az containerapp update<br/>--image registro/repo:tag]
+    up --> rev[revisión Provisioned / Healthy]
+    rev --> http[HTTP 200]
 ```
 
-| Job | Detalle |
+| Paso | Detalle |
 |---|---|
-| `ci` | Reutiliza `ci.yml` (`workflow_call`). Si falla una prueba, no se despliega nada. |
-| `infra` | Única etapa con `environment: production`: si configuras revisores, aquí se aprueba el despliegue. Calcula el tag `yyyyMMddHHmm-<sha7>` y despliega identidad, Key Vault, ACR y Log Analytics. |
-| `images` | Matriz de 9 jobs en paralelo con caché de capas de GitHub (`type=gha`). Publica `:<tag>` y `:latest`. Se omite si se lanza con `image_tag` (rollback). |
-| `apps` | Verifica que las 9 imágenes del tag existen en ACR y despliega las Container Apps. Escribe las URLs y las revisiones activas en el resumen. |
-| `smoke` | Espera hasta 5 min a que la API devuelva JSON y ejecuta `smoke-test.ps1 -ExpectKeyVault`. Publica el log como artefacto. |
-| `aks` | Solo si se marca `deploy_aks` al lanzarlo a mano. Ejecuta `scripts/azure/deploy-aks.ps1` con el mismo tag. |
+| Detectar | El frontend usa la app de la variable `FRONTEND_APP` (por defecto `teamforme-frontend`). El backend lista las apps del grupo: entra una app si se llama `teamforme-<componente>` o `<componente>` y su imagen viene de un ACR. El registro y el repositorio se toman **de la imagen que la app usa hoy** |
+| Build + push | Tag `yyyyMMddHHmm-<sha7>` (más `latest`) en el mismo registro |
+| Actualizar | `az containerapp update --image`. La app conserva sus credenciales de registro, ingress, escalado y variables |
+| Esperar | Se consulta el estado de la revisión (`provisioningState` y `healthState`), no `latestReadyRevisionName`, que algunas apps devuelven vacío |
+| Verificar | Si la app es pública, la URL debe responder 200 |
 
-`concurrency: deploy-production` impide dos despliegues simultáneos: el segundo espera al primero.
+## 2. Conectar cada repositorio con Azure (una sola vez por repositorio)
 
-## 2. Requisito: el sistema completo en un repositorio
+La identidad `id-github-deployer` (Central US, roles Contributor y Role Based Access Control
+Administrator sobre `rg-teamforme`) es compartida. Cada repositorio necesita sus propias
+**credenciales federadas**: el script las agrega en dos formatos de *subject*, por nombre
+(`repo:Carl-Fabri/<repo>:…`) y con ID inmutables (`repo:Carl-Fabri@68086080/<repo>@<id>:…`), que
+es el que GitHub está enviando.
 
-Hoy solo `TeamForMeFrontend/` es un repositorio git (`github.com/Carl-Fabri/TeamForMe`). El
-pipeline necesita **todo** el directorio `TeamForMe/` en el repositorio (backend, infra, gateway,
-scripts y `.github/`). La forma recomendada conserva el historial y el remoto actuales: mover el
-`.git` del frontend a la raíz.
-
-> Hazlo cuando tu otra sesión de trabajo no esté a mitad de cambios, y revisa `git status` antes
-> del commit.
-
-```powershell
-cd C:\laragon\www\TeamForMe
-```
-```powershell
-Move-Item TeamForMeFrontend\.git .git
-```
-```powershell
-git status
-```
-Git verá los archivos del frontend como "movidos" a `TeamForMeFrontend/` y el resto como nuevos.
-Revisa que no aparezcan `.env`, `infra/secrets.local.json`, `bin/` ni `obj/`: el `.gitignore` raíz
-los excluye.
-```powershell
-git add -A
-```
-```powershell
-git commit -m "Monorepo: backend, infraestructura y pipeline de GitHub Actions"
-```
-```powershell
-git push origin HEAD:main
-```
-Si tu rama principal se llama `master`, renómbrala (`git branch -m master main`) o cambia
-`branches: [main]` en `deploy.yml` y el *subject* `ref:refs/heads/main` en `setup-oidc.ps1`.
-
-## 3. Conectar GitHub con Azure (una sola vez)
-
+Desde `TeamForMeBackend\cloud`:
 ```powershell
 az login
 ```
 ```powershell
-./scripts/github/setup-oidc.ps1 -Repo Carl-Fabri/TeamForMe
+./scripts/github/setup-oidc.ps1 -Repo Carl-Fabri/TeamForMeBackend -Branch master
 ```
-El script hace lo siguiente:
-1. Crea la identidad administrada `id-github-deployer` en `rg-teamforme`.
-2. Le agrega dos credenciales federadas que solo aceptan tokens de **ese repositorio**:
-   - `repo:Carl-Fabri/TeamForMe:environment:production`, para el job `infra`.
-   - `repo:Carl-Fabri/TeamForMe:ref:refs/heads/main`, para el resto de jobs.
-3. Le asigna **Contributor** y **Role Based Access Control Administrator**, solo sobre el grupo de recursos.
-4. Imprime los valores que hay que cargar en **GitHub → Settings → Secrets and variables → Actions**:
+```powershell
+./scripts/github/setup-oidc.ps1 -Repo Carl-Fabri/TeamForMe -Branch main
+```
+El script es idempotente: lo que ya existe se salta. Valida además que `-Location` (por defecto
+`centralus`) esté entre las regiones permitidas por la política de Azure for Students
+(centralus, mexicocentral, chilecentral, canadacentral, eastus).
 
-| Tipo | Nombre | Valor |
-|---|---|---|
-| Variable | `AZURE_CLIENT_ID` | client id de `id-github-deployer` |
-| Variable | `AZURE_TENANT_ID` | tenant de tu cuenta |
-| Variable | `AZURE_SUBSCRIPTION_ID` | suscripción Azure for Students |
-| Variable | `AZURE_RESOURCE_GROUP` | `rg-teamforme` |
-| Variable | `AZURE_LOCATION` | `centralus` (región donde ya funcionó tu Container App) |
-| Secret | `INTERNAL_API_KEY` | generado por el script; termina en Key Vault como `Internal--ApiKey` |
-| Secret | `GRAFANA_ADMIN_PASSWORD` | generado por el script; termina en Key Vault |
+En **cada** repositorio de GitHub, en **Settings → Secrets and variables → Actions → Variables**:
 
-Con `-ConfigureGitHub` el script los carga solo, usando la CLI `gh` (`winget install GitHub.cli`
-y `gh auth login`).
+| Variable | Valor |
+|---|---|
+| `AZURE_CLIENT_ID` | `6dfd074e-670d-493d-b66c-96165ef334c9` |
+| `AZURE_TENANT_ID` | `c4a66c34-2bb7-451f-8be1-b2c26a430158` |
+| `AZURE_SUBSCRIPTION_ID` | `02aca008-ae8e-42ba-996a-54c271eb6d0f` |
+| `AZURE_RESOURCE_GROUP` | `rg-teamforme` (opcional, es el valor por defecto) |
+| `AZURE_LOCATION` | `centralus` (solo lo usa `infra.yml`) |
 
-Opcional, muy recomendado: **Settings → Environments → production → Required reviewers**. Así
-cada despliegue espera tu aprobación antes de tocar Azure.
+Para `infra.yml` del backend, además, en **Secrets**: `INTERNAL_API_KEY` y `GRAFANA_ADMIN_PASSWORD`
+(los genera el script).
 
-## 4. Desplegar
+Y en cada repositorio: **Settings → Environments → New environment → `production`**. Opcional:
+**Required reviewers** para aprobar cada despliegue.
 
-- **Automático:** cualquier push a `main` que toque `microservices/`, `TeamForMeFrontend/`,
-  `gateway/`, `observability/`, `infra/`, `k8s/`, el smoke test o los workflows.
-- **Manual:** **Actions → Deploy · Azure → Run workflow**.
-- **Rollback:** **Run workflow** con `image_tag` = un tag anterior (por ejemplo `202611161530-a1b2c3d`).
-  No reconstruye imágenes: solo vuelve a apuntar las Container Apps a ese tag. Los tags
-  disponibles están en `az acr repository show-tags -n <acr> --repository teamforme/gateway -o table`.
-- **Con AKS:** **Run workflow** marcando `deploy_aks`. Recuerda pausar el clúster después
+## 3. Desplegar
+- **Frontend:** push a `main` en `TeamForMeFrontend\`, o **Actions → Deploy · frontend → Run workflow**.
+- **Backend:** push a `master` en `TeamForMeBackend\` que toque `cloud/microservices`,
+  `cloud/gateway` o `cloud/observability`, o **Actions → Deploy · backend → Run workflow**.
+  Hoy no hay apps del backend en Azure: el workflow terminará con el aviso "No hay Container Apps del backend".
+- **Infraestructura completa del backend:** **Actions → Infra · infraestructura completa → Run workflow**
+  (ver el pendiente de la sección 1).
+- **Rollback (cualquier app):**
+  ```powershell
+  az containerapp update -n <app> -g rg-teamforme --image <registro>/<repositorio>:<tag-anterior>
+  ```
+  Los tags anteriores: `az acr repository show-tags -n <acr> --repository <repositorio> -o table`.
+- **Con AKS:** `infra.yml` marcando `deploy_aks`. Pausa el clúster después
   (`./scripts/azure/costs.ps1 -Action Pause`).
 
-## 5. Dónde ver que todo salió bien
+## 4. Dónde ver que todo salió bien
 
-### En GitHub
+### En GitHub (en cada repositorio)
 | Lugar | Qué muestra |
 |---|---|
-| **Actions → Deploy · Azure → (la ejecución)** | Grafo de jobs con su estado: verde ✓, rojo ✗ u omitido |
-| Pestaña **Summary** de la ejecución | Tag desplegado, Key Vault y ACR usados, **URLs** del gateway y Grafana, tabla de **revisiones activas** y salida completa del **smoke test** (GO/NO-GO) |
-| Clic en un job → cada paso | Log completo línea a línea, con el comando y su salida (por ejemplo, `az deployment group create`) |
-| **Artifacts** al pie de la ejecución | `smoke-test-log` y `backend-test-results` (archivos `.trx` de `dotnet test`), descargables |
-| **Environments → production** (barra lateral del repositorio) | Historial de despliegues: qué commit, cuándo y quién lo aprobó |
-| Pestaña **Pull requests** | El check "CI" en cada PR: si está en rojo, no conviene fusionar |
-
-Un despliegue está bien hecho cuando **todos los jobs están en verde** y el resumen del smoke
-test termina en `GO: 15 pruebas OK`.
+| **Actions → (workflow) → (la ejecución)** | Grafo de jobs con su estado: verde ✓, rojo ✗ u omitido |
+| Pestaña **Summary** | Apps detectadas, imagen anterior y nueva, revisión creada, URL y resultado; en `infra.yml`, además, URLs, revisiones activas y el smoke test (GO/NO-GO) |
+| Clic en un job → cada paso | Log completo línea a línea, con el comando y su salida |
+| **Artifacts** al pie de la ejecución | `test-results` (archivos `.trx` de `dotnet test`) y, en `infra.yml`, `smoke-test-log` |
+| **Environments → production** | Historial de despliegues: qué commit, cuándo y quién lo aprobó |
+| Pestaña **Pull requests** | El check "CI" en cada PR |
 
 ### En Azure
 | Lugar | Qué muestra |
 |---|---|
-| Portal → `rg-teamforme` → **Deployments** | `teamforme-base` y `teamforme-apps` con su estado (Succeeded/Failed), duración y cada recurso creado |
-| Portal → Container App → **Revisions and replicas** | Revisión nueva por cada tag, tráfico al 100 % en la activa y réplicas en ejecución |
-| Portal → Container App → **Log stream** / **Monitoring → Logs** | Logs en vivo / consulta KQL en Log Analytics |
-| Portal → Container App → **Metrics** | Requests, Replica Count, CPU y memoria (series temporales de Azure Monitor) |
-| Grafana (URL del resumen) | Dashboard *TeamForMe · Microservicios* con datos de Prometheus |
-| `<gateway>/api/events/_info` | Versión desplegada (`version` = tag del pipeline) y `keyVault: true` |
+| Portal → Container App → **Revisions and replicas** | Revisión nueva por cada despliegue, con el 100 % del tráfico en la activa |
+| Portal → ACR → **Repositories** | El tag nuevo de cada imagen |
+| Portal → Container App → **Log stream** / **Metrics** | Logs en vivo y series temporales (Requests, Replica Count, CPU, memoria) |
+| Portal → `rg-teamforme` → **Deployments** | Solo para `infra.yml`: `teamforme-base` y `teamforme-apps` |
 
-## 6. Cómo consultar el estado del despliegue desde la terminal
-
-Son los mismos comandos de solo lectura que usé para revisar el despliegue manual del frontend;
-puedes ejecutarlos tú en cualquier momento:
-
+## 5. Comandos de verificación (solo lectura)
 ```bash
-az account show -o table
+az containerapp list -g rg-teamforme --query "[].{app:name, imagen:properties.template.containers[0].image, revision:properties.latestRevisionName}" -o table
 ```
 ```bash
-az resource list -g rg-teamforme --query "[].{nombre:name, tipo:type, region:location}" -o table
+az containerapp revision list -n teamforme-frontend -g rg-teamforme -o table
 ```
 ```bash
-az deployment group list -g rg-teamforme --query "[].{nombre:name, estado:properties.provisioningState, fecha:properties.timestamp}" -o table
+az identity federated-credential list -g rg-teamforme --identity-name id-github-deployer --query "[].subject" -o tsv
 ```
 ```bash
-az containerapp list -g rg-teamforme --query "[].{app:name, estado:properties.runningStatus, revision:properties.latestRevisionName, url:properties.configuration.ingress.fqdn}" -o table
+gh run list --repo Carl-Fabri/TeamForMe --workflow deploy.yml
 ```
 ```bash
-az containerapp revision list -n gateway -g rg-teamforme -o table
-```
-```bash
-az acr repository show-tags -n <acr> --repository teamforme/gateway -o table
-```
-```bash
-az containerapp logs show -n ms-applications -g rg-teamforme --tail 50
-```
-Y con la CLI de GitHub (`gh`), para ver las ejecuciones sin abrir el navegador:
-```bash
-gh run list --workflow deploy.yml
-```
-```bash
-gh run view --log-failed
+gh run list --repo Carl-Fabri/TeamForMeBackend --workflow deploy.yml
 ```
 
-## 7. Convivencia con el despliegue manual actual
-
-En `rg-teamforme` ya existe un despliegue hecho a mano (`teamforme-frontend`, `teamforme-env-cus`,
-`acrteamforme93140`). El pipeline crea **recursos con otros nombres** (`cae-teamforme`, `gateway`,
-`frontend`, `acrteamforme<sufijo>`…), así que no los modifica ni los borra. Cuando el pipeline
-funcione, elimina los recursos manuales para no pagar dos registros:
-```bash
-az containerapp delete -n teamforme-frontend -g rg-teamforme --yes
-```
-(y luego los entornos `teamforme-env` y `teamforme-env-cus` y los ACR `acrteamforme93140` y `ca7c45ddbf8aacr`).
-
-## 8. Seguridad del pipeline
-- **Sin secretos de Azure en GitHub:** el token OIDC dura minutos y solo se emite para este
-  repositorio y para la rama `main` o el entorno `production`.
+## 6. Seguridad
+- **Sin secretos de Azure en GitHub:** el token OIDC dura minutos y solo se emite para estos
+  repositorios, su rama principal o el entorno `production`.
 - **Mínimo privilegio:** la identidad del pipeline solo tiene permisos sobre `rg-teamforme`.
-- **Permisos de los workflows:** `contents: read` + `id-token: write`; nada más.
+- **Permisos de los workflows:** `contents: read` + `id-token: write`.
 - **Secretos de la aplicación:** `INTERNAL_API_KEY` y `GRAFANA_ADMIN_PASSWORD` solo existen en
-  GitHub Secrets y Key Vault. GitHub los oculta (`***`) en los logs.
+  GitHub Secrets y Key Vault, y GitHub los oculta (`***`) en los logs.
 - **Los pull requests no despliegan:** solo corre la CI, sin acceso a Azure.
