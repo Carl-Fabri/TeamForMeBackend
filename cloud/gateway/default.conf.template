@@ -27,6 +27,10 @@ server {
     set $frontend_upstream      ${FRONTEND_UPSTREAM};
 
     proxy_http_version 1.1;
+    # Upstreams HTTPS (p. ej. el frontend del repositorio TeamForMe en otro entorno de Container
+    # Apps): enviar el nombre del servidor en el handshake TLS (SNI); sin esto el ingreso de Azure
+    # no sabe a qué app va la conexión. No afecta a los upstreams HTTP.
+    proxy_ssl_server_name on;
     proxy_connect_timeout 5s;
     proxy_read_timeout 30s;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;

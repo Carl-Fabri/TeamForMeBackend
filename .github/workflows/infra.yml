@@ -2,10 +2,11 @@
 # Solo se ejecuta a mano (Actions → Run workflow) porque crea recursos. Para actualizar las apps
 # del backend que ya existen, en cada push a master, se usa deploy.yml.
 #
-# Pendiente: el Bicep (cloud/infra/modules/containerapps.bicep) todavía crea su propia app
-# "frontend" con la imagen teamforme/frontend del ACR del backend, que este repositorio no
-# construye. Hasta ajustar el Bicep para apuntar al teamforme-frontend existente, la fase 2
-# se detiene en "Verificar que las imágenes del tag existen".
+# Frontend: no se crea aquí. Se usa la Container App FRONTEND_APP (por defecto
+# "teamforme-frontend", desplegada desde el repositorio TeamForMe); su URL pública se pasa a
+# Bicep como frontendUrl y el gateway envía "/" a ella. Las apps del backend se crean en el
+# MISMO entorno de Container Apps que ese frontend (existingEnvironmentName), porque Azure for
+# Students permite un solo entorno por región.
 #
 #   CI  →  Bicep fase 1  →  9 imágenes a ACR  →  Bicep fase 2  →  smoke test (GO / NO-GO)
 #                                                              ↘  AKS (opcional)
@@ -44,6 +45,7 @@ env:
   LOCATION: ${{ vars.AZURE_LOCATION || 'centralus' }}
   PREFIX: teamforme
   DEPLOY_AKS: ${{ inputs.deploy_aks && 'true' || 'false' }}
+  FRONTEND_APP: ${{ vars.FRONTEND_APP || 'teamforme-frontend' }}
 
 jobs:
   ci:
@@ -169,14 +171,26 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID || secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID || secrets.AZURE_SUBSCRIPTION_ID }}
 
+      - name: Obtener el frontend existente y su entorno
+        id: frontend
+        run: |
+          read -r fqdn envId <<<"$(az containerapp show -n "$FRONTEND_APP" -g "$RESOURCE_GROUP" \
+            --query "[properties.configuration.ingress.fqdn, properties.environmentId]" -o tsv | tr -d '\r' | tr '\n' ' ')"
+          [ -n "$fqdn" ] || { echo "::error::No existe la Container App $FRONTEND_APP en $RESOURCE_GROUP (despliégala desde el repositorio TeamForMe)"; exit 1; }
+          # Azure for Students permite 1 entorno de Container Apps por región: el backend se
+          # despliega en el mismo entorno que el frontend en lugar de crear otro.
+          echo "url=https://$fqdn" >> "$GITHUB_OUTPUT"
+          echo "environment=${envId##*/}" >> "$GITHUB_OUTPUT"
+          echo "Frontend: https://$fqdn · entorno: ${envId##*/}"
+
       - name: Verificar que las imágenes del tag existen
         env:
           ACR: ${{ needs.infra.outputs.acr_name }}
           TAG: ${{ needs.infra.outputs.tag }}
         run: |
-          for img in ms-events ms-teams ms-applications ms-users ms-notifications gateway frontend prometheus grafana; do
+          for img in ms-events ms-teams ms-applications ms-users ms-notifications gateway prometheus grafana; do
             az acr manifest show-metadata -r "$ACR" -n "teamforme/$img:$TAG" -o none \
-              || { if [ "$img" = frontend ]; then echo "::error::No existe teamforme/frontend:$TAG en $ACR. El frontend se publica desde el repositorio TeamForMe; falta ajustar containerapps.bicep para usar el teamforme-frontend existente."; else echo "::error::No existe teamforme/$img:$TAG en $ACR"; fi; exit 1; }
+              || { echo "::error::No existe teamforme/$img:$TAG en $ACR"; exit 1; }
           done
 
       - name: Desplegar Container Apps
@@ -185,10 +199,13 @@ jobs:
           TFM_INTERNAL_API_KEY: ${{ secrets.INTERNAL_API_KEY }}
           TFM_GRAFANA_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
           TAG: ${{ needs.infra.outputs.tag }}
+          FRONTEND_URL: ${{ steps.frontend.outputs.url }}
+          EXISTING_ENV: ${{ steps.frontend.outputs.environment }}
         run: |
           out=$(az deployment group create -g "$RESOURCE_GROUP" -n teamforme-apps \
             -f cloud/infra/main.bicep -p cloud/infra/main.bicepparam \
             -p deployApps=true imageTag="$TAG" prefix="$PREFIX" location="$LOCATION" deployAks="$DEPLOY_AKS" \
+               frontendUrl="$FRONTEND_URL" existingEnvironmentName="$EXISTING_ENV" \
             --query properties.outputs -o json)
           gw=$(jq -r .gatewayUrl.value <<<"$out"); gf=$(jq -r .grafanaUrl.value <<<"$out")
           echo "gateway_url=$gw" >> "$GITHUB_OUTPUT"

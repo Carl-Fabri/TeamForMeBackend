@@ -31,10 +31,22 @@ C:\laragon\www\TeamForMe\
 | `.github/workflows/deploy.yml` | push a `master` que toque `cloud/microservices`, `cloud/gateway` o `cloud/observability`, o manual | CI → detecta las Container Apps del backend que **ya existen** → build + push al registro de cada una → update → verificación. Si no existe ninguna, termina sin desplegar |
 | `.github/workflows/infra.yml` | **Solo manual** | Crea o actualiza la infraestructura completa con Bicep (fases 1 y 2) + smoke test + AKS opcional |
 
-> **Pendiente en `infra.yml`:** `cloud/infra/modules/containerapps.bicep` todavía crea su propia app
-> `frontend` con la imagen `teamforme/frontend` del ACR del backend, que este repositorio no
-> construye. Hasta ajustar el Bicep para que el gateway apunte al `teamforme-frontend` existente,
-> la fase 2 se detiene en "Verificar que las imágenes del tag existen", con un mensaje explicativo.
+#### Cómo crea `infra.yml` las apps del backend
+`infra.yml` lee la Container App del frontend (variable `FRONTEND_APP`, por defecto
+`teamforme-frontend`) y le pasa a Bicep dos parámetros de `cloud/infra/main.bicep`:
+
+| Parámetro | Valor que pasa `infra.yml` | Efecto en `containerapps.bicep` |
+|---|---|---|
+| `frontendUrl` | URL pública de `teamforme-frontend` | No se crea la app `frontend`; el gateway envía `/` a esa URL por HTTPS (con SNI, `proxy_ssl_server_name on` en nginx) |
+| `existingEnvironmentName` | El entorno de ese frontend (`teamforme-env-cus`) | Las apps se crean en ese entorno en vez de crear `cae-teamforme`. **Azure for Students permite un solo entorno de Container Apps por región** (error `MaxNumberOfRegionalEnvironmentsInSubExceeded`) |
+
+Con ambos vacíos (por ejemplo, desde `scripts/azure/deploy.ps1`), el Bicep se comporta como antes:
+crea su propio entorno y su app `frontend`.
+
+Verificado con un *what-if* (vista previa sin aplicar cambios) del módulo con tus recursos reales:
+crea `gateway`, `grafana`, `prometheus`, `ms-events`, `ms-teams`, `ms-applications`, `ms-users` y
+`ms-notifications` en `teamforme-env-cus`, **no** crea una app `frontend` ni otro entorno, y el
+gateway queda con `FRONTEND_UPSTREAM=https://teamforme-frontend…azurecontainerapps.io`.
 
 ### Flujo de los workflows de despliegue (los dos repositorios)
 ```mermaid
@@ -97,9 +109,12 @@ Y en cada repositorio: **Settings → Environments → New environment → `prod
 - **Frontend:** push a `main` en `TeamForMeFrontend\`, o **Actions → Deploy · frontend → Run workflow**.
 - **Backend:** push a `master` en `TeamForMeBackend\` que toque `cloud/microservices`,
   `cloud/gateway` o `cloud/observability`, o **Actions → Deploy · backend → Run workflow**.
-  Hoy no hay apps del backend en Azure: el workflow terminará con el aviso "No hay Container Apps del backend".
-- **Infraestructura completa del backend:** **Actions → Infra · infraestructura completa → Run workflow**
-  (ver el pendiente de la sección 1).
+  Mientras no existan las apps del backend en Azure, el workflow termina con el aviso "No hay
+  Container Apps del backend".
+- **Crear las apps del backend (una vez):** **Actions → Infra · infraestructura completa → Run workflow**
+  en la rama `master`. Requiere además, en GitHub, los secrets `INTERNAL_API_KEY` y
+  `GRAFANA_ADMIN_PASSWORD` y la variable `AZURE_LOCATION` = `centralus`. Desde entonces, cada push a
+  `master` las actualiza con `deploy.yml`.
 - **Rollback (cualquier app):**
   ```powershell
   az containerapp update -n <app> -g rg-teamforme --image <registro>/<repositorio>:<tag-anterior>

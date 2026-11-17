@@ -8,12 +8,24 @@ param identityClientId string
 param registryServer string
 param keyVaultUri string
 param imageTag string
+@description('URL de un frontend ya desplegado (p. ej. https://teamforme-frontend.<dominio>). Si se indica, no se crea la app "frontend" y el gateway envía "/" a esa URL. Vacío = crear la app "frontend" en este entorno.')
+param frontendUrl string = ''
+
+@description('Nombre de un Container Apps Environment existente del grupo de recursos para reutilizarlo. Azure for Students permite 1 entorno por región. Vacío = crear environmentName.')
+param existingEnvironmentName string = ''
+
+var useExistingFrontend = !empty(frontendUrl)
+var useExistingEnvironment = !empty(existingEnvironmentName)
 
 resource logs 'Microsoft.OperationalInsights/workspaces@2023-09-01' existing = {
   name: logAnalyticsName
 }
 
-resource environment 'Microsoft.App/managedEnvironments@2024-03-01' = {
+resource existingEnvironment 'Microsoft.App/managedEnvironments@2024-03-01' existing = if (useExistingEnvironment) {
+  name: existingEnvironmentName
+}
+
+resource newEnvironment 'Microsoft.App/managedEnvironments@2024-03-01' = if (!useExistingEnvironment) {
   name: environmentName
   location: location
   properties: {
@@ -26,6 +38,9 @@ resource environment 'Microsoft.App/managedEnvironments@2024-03-01' = {
     }
   }
 }
+
+var environmentId = useExistingEnvironment ? existingEnvironment.id : newEnvironment.id
+var environmentDomain = useExistingEnvironment ? existingEnvironment!.properties.defaultDomain : newEnvironment!.properties.defaultDomain
 
 // Variables comunes de los microservicios .NET: Key Vault vía SDK + identidad administrada.
 var dotnetEnv = [
@@ -48,14 +63,15 @@ var httpScaleRule = [
 // El resolver de nginx no aplica dominios de búsqueda: el gateway necesita el FQDN interno.
 // Va fuera de "apps" porque defaultDomain solo se conoce en tiempo de despliegue y el arreglo
 // de un loop debe poder calcularse al inicio.
-var internalSuffix = 'internal.${environment.properties.defaultDomain}'
+var internalSuffix = 'internal.${environmentDomain}'
 var gatewayEnv = [
   { name: 'EVENTS_UPSTREAM', value: 'http://ms-events.${internalSuffix}' }
   { name: 'TEAMS_UPSTREAM', value: 'http://ms-teams.${internalSuffix}' }
   { name: 'APPLICATIONS_UPSTREAM', value: 'http://ms-applications.${internalSuffix}' }
   { name: 'USERS_UPSTREAM', value: 'http://ms-users.${internalSuffix}' }
   { name: 'NOTIFICATIONS_UPSTREAM', value: 'http://ms-notifications.${internalSuffix}' }
-  { name: 'FRONTEND_UPSTREAM', value: 'http://frontend.${internalSuffix}' }
+  // Frontend existente (otro entorno, otro repositorio): se alcanza por su URL pública HTTPS.
+  { name: 'FRONTEND_UPSTREAM', value: useExistingFrontend ? frontendUrl : 'http://frontend.${internalSuffix}' }
 ]
 
 // Catálogo de apps. minReplicas 0 = "scale to zero": sin tráfico no consume (ni cobra) CPU.
@@ -68,7 +84,7 @@ var gatewayEnv = [
 //   - RateLimit__*: token bucket por cliente (ráfaga 100, 50 peticiones/s).
 var multiRevisionApps = ['ms-events']
 
-var apps = [
+var allApps = [
   {
     name: 'ms-events'
     image: 'teamforme/ms-events'
@@ -217,6 +233,10 @@ var apps = [
   }
 ]
 
+// Con un frontend existente (repositorio TeamForMe), este entorno no crea su propia app "frontend".
+var apps = filter(allApps, app => !(useExistingFrontend && app.name == 'frontend'))
+var appNames = map(apps, app => app.name)
+
 resource containerApps 'Microsoft.App/containerApps@2024-03-01' = [for app in apps: {
   name: app.name
   location: location
@@ -225,7 +245,7 @@ resource containerApps 'Microsoft.App/containerApps@2024-03-01' = [for app in ap
     userAssignedIdentities: { '${identityId}': {} }
   }
   properties: {
-    managedEnvironmentId: environment.id
+    managedEnvironmentId: environmentId
     configuration: {
       activeRevisionsMode: contains(multiRevisionApps, app.name) ? 'Multiple' : 'Single'
       ingress: {
@@ -259,6 +279,7 @@ resource containerApps 'Microsoft.App/containerApps@2024-03-01' = [for app in ap
   }
 }]
 
-output environmentId string = environment.id
-output gatewayUrl string = 'https://${containerApps[6].properties.configuration.ingress.fqdn}'
-output grafanaUrl string = 'https://${containerApps[8].properties.configuration.ingress.fqdn}'
+output environmentId string = environmentId
+// Por nombre y no por posición: el arreglo cambia según exista o no la app "frontend".
+output gatewayUrl string = 'https://${containerApps[indexOf(appNames, 'gateway')].properties.configuration.ingress.fqdn}'
+output grafanaUrl string = 'https://${containerApps[indexOf(appNames, 'grafana')].properties.configuration.ingress.fqdn}'
