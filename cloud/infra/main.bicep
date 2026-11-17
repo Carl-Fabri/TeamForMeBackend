@@ -20,6 +20,12 @@ param deployApps bool = false
 
 param imageTag string = 'latest'
 
+@description('URL pública de un frontend ya desplegado (repositorio TeamForMe). Vacío = crear la app "frontend" aquí.')
+param frontendUrl string = ''
+
+@description('Container Apps Environment existente a reutilizar (Azure for Students permite 1 por región). Vacío = crear cae-<prefix>.')
+param existingEnvironmentName string = ''
+
 @secure()
 @description('Secreto compartido entre microservicios. Se guarda en Key Vault como Internal--ApiKey.')
 param internalApiKey string
@@ -89,6 +95,8 @@ module containerApps 'modules/containerapps.bicep' = if (deployApps) {
     registryServer: registry.outputs.loginServer
     keyVaultUri: keyVault.outputs.uri
     imageTag: imageTag
+    frontendUrl: frontendUrl
+    existingEnvironmentName: existingEnvironmentName
   }
 }
 

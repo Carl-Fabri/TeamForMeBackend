@@ -1,0 +1,101 @@
+# CI del backend de TeamForMe: plantilla gRPC + microservicios, infraestructura e imágenes (cloud/).
+# Corre en cada pull request y en ramas distintas de master; deploy.yml e infra.yml lo reutilizan.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches-ignore: [master]
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  # Cuando otro workflow lo llama, event_name es el del llamador: no se corta un despliegue.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  dotnet:
+    name: .NET 10 · build y pruebas
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Plantilla gRPC
+        run: dotnet build TeamForMeBackend.slnx -c Release
+
+      - name: Microservicios · compilar
+        working-directory: cloud/microservices
+        run: dotnet build TeamForMe.Microservices.slnx -c Release
+
+      - name: Microservicios · pruebas
+        working-directory: cloud/microservices
+        run: >
+          dotnet test TeamForMe.Microservices.slnx -c Release --no-build
+          --logger "trx;LogFileName=resultados.trx"
+          --results-directory ${{ github.workspace }}/test-results
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: test-results
+          if-no-files-found: ignore
+
+  infra:
+    name: Bicep y Kubernetes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compilar Bicep
+        env:
+          TFM_INTERNAL_API_KEY: ci-placeholder
+          TFM_GRAFANA_PASSWORD: ci-placeholder
+        run: |
+          az bicep install
+          az bicep build -f cloud/infra/main.bicep --stdout > /dev/null
+          az bicep build-params -f cloud/infra/main.bicepparam --stdout > /dev/null
+          echo "Bicep OK"
+
+      - name: Renderizar Kustomize
+        run: |
+          kubectl kustomize cloud/k8s/ms-events/overlays/local > /dev/null
+          kubectl kustomize cloud/k8s/ms-events/overlays/aks > /dev/null
+          echo "Kustomize OK"
+
+  images:
+    name: Imagen · ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: ms-events,        context: cloud/microservices,            args: "SERVICE=MS.Events" }
+          - { name: ms-teams,         context: cloud/microservices,            args: "SERVICE=MS.Teams" }
+          - { name: ms-applications,  context: cloud/microservices,            args: "SERVICE=MS.Applications" }
+          - { name: ms-users,         context: cloud/microservices,            args: "SERVICE=MS.Users" }
+          - { name: ms-notifications, context: cloud/microservices,            args: "SERVICE=MS.Notifications" }
+          - { name: gateway,          context: cloud/gateway,                  args: "" }
+          - { name: prometheus,       context: cloud/observability/prometheus, args: "" }
+          - { name: grafana,          context: cloud/observability/grafana,    args: "" }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Solo verifica que la imagen se construye; no publica nada.
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          build-args: ${{ matrix.args }}
+          push: false
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
