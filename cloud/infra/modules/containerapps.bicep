@@ -14,8 +14,20 @@ param frontendUrl string = ''
 @description('Nombre de un Container Apps Environment existente del grupo de recursos para reutilizarlo. Azure for Students permite 1 entorno por región. Vacío = crear environmentName.')
 param existingEnvironmentName string = ''
 
+@secure()
+@description('Contraseña de Grafana. Solo se usa al reutilizar un entorno existente (ver expressCompatible).')
+param grafanaAdminPassword string = ''
+
 var useExistingFrontend = !empty(frontendUrl)
 var useExistingEnvironment = !empty(existingEnvironmentName)
+
+// Al reutilizar un entorno existente se asume que puede ser "Express" (el tipo que crea el portal
+// por defecto), que no admite ingress.allowInsecure ni secretos con keyVaultUrl:
+//   - las apps internas solo aceptan HTTPS y se llaman entre sí por https://<app>.internal.<dominio>;
+//   - la contraseña de Grafana va como secreto de la app (mismo valor que en Key Vault).
+// Ambos ajustes también son válidos en un entorno normal.
+var expressCompatible = useExistingEnvironment
+var internalScheme = expressCompatible ? 'https' : 'http'
 
 resource logs 'Microsoft.OperationalInsights/workspaces@2023-09-01' existing = {
   name: logAnalyticsName
@@ -65,14 +77,31 @@ var httpScaleRule = [
 // de un loop debe poder calcularse al inicio.
 var internalSuffix = 'internal.${environmentDomain}'
 var gatewayEnv = [
-  { name: 'EVENTS_UPSTREAM', value: 'http://ms-events.${internalSuffix}' }
-  { name: 'TEAMS_UPSTREAM', value: 'http://ms-teams.${internalSuffix}' }
-  { name: 'APPLICATIONS_UPSTREAM', value: 'http://ms-applications.${internalSuffix}' }
-  { name: 'USERS_UPSTREAM', value: 'http://ms-users.${internalSuffix}' }
-  { name: 'NOTIFICATIONS_UPSTREAM', value: 'http://ms-notifications.${internalSuffix}' }
-  // Frontend existente (otro entorno, otro repositorio): se alcanza por su URL pública HTTPS.
-  { name: 'FRONTEND_UPSTREAM', value: useExistingFrontend ? frontendUrl : 'http://frontend.${internalSuffix}' }
+  { name: 'EVENTS_UPSTREAM', value: '${internalScheme}://ms-events.${internalSuffix}' }
+  { name: 'TEAMS_UPSTREAM', value: '${internalScheme}://ms-teams.${internalSuffix}' }
+  { name: 'APPLICATIONS_UPSTREAM', value: '${internalScheme}://ms-applications.${internalSuffix}' }
+  { name: 'USERS_UPSTREAM', value: '${internalScheme}://ms-users.${internalSuffix}' }
+  { name: 'NOTIFICATIONS_UPSTREAM', value: '${internalScheme}://ms-notifications.${internalSuffix}' }
+  // Frontend existente (otro repositorio): se alcanza por su URL pública HTTPS.
+  { name: 'FRONTEND_UPSTREAM', value: useExistingFrontend ? frontendUrl : '${internalScheme}://frontend.${internalSuffix}' }
 ]
+
+// Variables que dependen del dominio del entorno (no pueden ir dentro de "allApps").
+// En modo normal se conservan los nombres cortos por HTTP de siempre.
+var applicationsEnv = concat(dotnetEnv, [
+  { name: 'Services__Teams', value: expressCompatible ? 'https://ms-teams.${internalSuffix}' : 'http://ms-teams' }
+  { name: 'Services__Notifications', value: expressCompatible ? 'https://ms-notifications.${internalSuffix}' : 'http://ms-notifications' }
+])
+var grafanaEnv = [
+  { name: 'PROMETHEUS_URL', value: expressCompatible ? 'https://prometheus.${internalSuffix}' : 'http://prometheus' }
+  { name: 'GF_SECURITY_ADMIN_PASSWORD', secretRef: 'grafana-admin-password' }
+  { name: 'GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH', value: '/var/lib/grafana/dashboards/teamforme-overview.json' }
+]
+var envOverrides = {
+  gateway: gatewayEnv
+  'ms-applications': applicationsEnv
+  grafana: grafanaEnv
+}
 
 // Catálogo de apps. minReplicas 0 = "scale to zero": sin tráfico no consume (ni cobra) CPU.
 // Los servicios con estado en memoria (teams, applications, notifications) se fijan en 1 réplica.
@@ -155,10 +184,8 @@ var allApps = [
     min: 1
     max: 1
     rules: []
-    env: concat(dotnetEnv, [
-      { name: 'Services__Teams', value: 'http://ms-teams' }
-      { name: 'Services__Notifications', value: 'http://ms-notifications' }
-    ])
+    // Se define en applicationsEnv (depende del dominio del entorno).
+    env: []
     probes: dotnetProbes
     secrets: []
   }
@@ -220,15 +247,13 @@ var allApps = [
     min: 1
     max: 1
     rules: []
-    env: [
-      { name: 'PROMETHEUS_URL', value: 'http://prometheus' }
-      // Referencia a Key Vault resuelta por la PLATAFORMA (sin SDK en la app).
-      { name: 'GF_SECURITY_ADMIN_PASSWORD', secretRef: 'grafana-admin-password' }
-      { name: 'GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH', value: '/var/lib/grafana/dashboards/teamforme-overview.json' }
-    ]
+    // Se define en grafanaEnv (depende del dominio del entorno).
+    env: []
     probes: []
     secrets: [
-      { name: 'grafana-admin-password', keyVaultUrl: '${keyVaultUri}secrets/grafana-admin-password', identity: identityId }
+      expressCompatible
+        ? { name: 'grafana-admin-password', value: grafanaAdminPassword }
+        : { name: 'grafana-admin-password', keyVaultUrl: '${keyVaultUri}secrets/grafana-admin-password', identity: identityId }
     ]
   }
 ]
@@ -253,7 +278,7 @@ resource containerApps 'Microsoft.App/containerApps@2024-03-01' = [for app in ap
         targetPort: app.port
         transport: 'auto'
         // Tráfico interno por HTTP dentro del entorno (Envoy); el externo siempre por HTTPS.
-        allowInsecure: !app.external
+        allowInsecure: !app.external && !expressCompatible
       }
       registries: [
         { server: registryServer, identity: identityId }
@@ -266,7 +291,7 @@ resource containerApps 'Microsoft.App/containerApps@2024-03-01' = [for app in ap
           name: app.name
           image: '${registryServer}/${app.image}:${imageTag}'
           resources: { cpu: json(app.cpu), memory: app.memory }
-          env: app.name == 'gateway' ? gatewayEnv : app.env
+          env: envOverrides[?app.name] ?? app.env
           probes: app.probes
         }
       ]

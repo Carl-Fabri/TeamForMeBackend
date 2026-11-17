@@ -97,6 +97,7 @@ module containerApps 'modules/containerapps.bicep' = if (deployApps) {
     imageTag: imageTag
     frontendUrl: frontendUrl
     existingEnvironmentName: existingEnvironmentName
+    grafanaAdminPassword: grafanaAdminPassword
   }
 }
 
