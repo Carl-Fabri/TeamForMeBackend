@@ -1,0 +1,4 @@
+.env
+infra/secrets.local.json
+# El frontend tiene su propio repositorio; se clona aquí solo para compose/deploy.
+TeamForMeFrontend/

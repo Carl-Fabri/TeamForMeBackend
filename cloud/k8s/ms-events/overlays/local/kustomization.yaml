@@ -1,0 +1,21 @@
+# Overlay LOCAL (kind / minikube / Docker Desktop Kubernetes).
+#   docker build --build-arg SERVICE=MS.Events -t teamforme/ms-events:local ../../../microservices
+#   kind load docker-image teamforme/ms-events:local      # solo si usas kind
+#   kubectl apply -k k8s/ms-events/overlays/local
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+secretGenerator:
+  - name: ms-events-secrets
+    namespace: teamforme
+    literals:
+      - internal-api-key=dev-internal-key-change-me
+generatorOptions:
+  disableNameSuffixHash: true
+patches:
+  - target: { kind: ConfigMap, name: ms-events-config }
+    patch: |-
+      - op: replace
+        path: /data/ASPNETCORE_ENVIRONMENT
+        value: Development

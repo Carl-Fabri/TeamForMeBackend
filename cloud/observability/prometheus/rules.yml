@@ -1,0 +1,31 @@
+# Reglas de grabación (pre-calculan series costosas) y alertas.
+groups:
+  - name: teamforme-recording
+    rules:
+      - record: job:http_requests:rate1m
+        expr: sum by (job) (rate(http_requests_received_total[1m]))
+      - record: job:http_request_duration_seconds:p95_5m
+        expr: histogram_quantile(0.95, sum by (le, job) (rate(http_request_duration_seconds_bucket[5m])))
+      - record: team:occupancy:ratio
+        expr: teamforme_team_seats_filled / teamforme_team_seats_capacity
+
+  - name: teamforme-alerts
+    rules:
+      - alert: ServicioCaido
+        expr: up{job=~"ms-.*"} == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.job }} ({{ $labels.instance }}) no responde"
+      - alert: LatenciaAlta
+        expr: job:http_request_duration_seconds:p95_5m > 0.5
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "p95 de {{ $labels.job }} supera 500 ms: considerar escalar"
+      - alert: ColaDePostulacionesCreciendo
+        expr: teamforme_applications_pending > 50
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "Más de 50 postulaciones pendientes: escalar workers"

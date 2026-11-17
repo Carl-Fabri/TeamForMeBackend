@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <ItemGroup>
+    <ProjectReference Include="..\TeamForMe.Shared\TeamForMe.Shared.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,75 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ms-events
+  namespace: teamforme
+  labels: &labels
+    app.kubernetes.io/name: ms-events
+    app.kubernetes.io/part-of: teamforme
+spec:
+  # El HPA gestiona las réplicas; este valor solo aplica en la primera creación.
+  replicas: 2
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ms-events
+  # Rolling update sin caída: se crea una réplica nueva antes de retirar una vieja.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  template:
+    metadata:
+      labels: *labels
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: ms-events
+      terminationGracePeriodSeconds: 30
+      # Reparto de réplicas entre nodos (alta disponibilidad, algoritmo "spread").
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app.kubernetes.io/name: ms-events }
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: ms-events
+          image: teamforme/ms-events:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: http, containerPort: 8080 }
+          envFrom:
+            - configMapRef: { name: ms-events-config }
+          env:
+            - name: Internal__ApiKey
+              valueFrom:
+                secretKeyRef: { name: ms-events-secrets, key: internal-api-key, optional: true }
+          # requests = lo que el scheduler reserva (bin packing); limits = techo duro.
+          # requests < limits => clase QoS "Burstable".
+          resources:
+            requests: { cpu: 50m, memory: 96Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+          startupProbe:
+            httpGet: { path: /health/live, port: http }
+            periodSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            httpGet: { path: /health/live, port: http }
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: { path: /health/ready, port: http }
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}

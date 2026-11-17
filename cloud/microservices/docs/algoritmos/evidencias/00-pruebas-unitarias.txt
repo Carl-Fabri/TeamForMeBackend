@@ -1,0 +1,19 @@
+PS> dotnet test microservices/tests/TeamForMe.Algorithms.Tests --logger "console;verbosity=normal"
+Fecha: 2026-11-16 19:42:19
+
+  Passed TeamForMe.Algorithms.Tests.TokenBucketTests.Permite_la_rafaga_y_rechaza_al_agotarse [5 ms]
+  Passed TeamForMe.Algorithms.Tests.HorizontalAutoscalerTests.Politica_de_subida_limita_el_crecimiento_por_paso [7 ms]
+  Passed TeamForMe.Algorithms.Tests.LoadBalancerTests.RoundRobin_recorre_en_orden_circular [6 ms]
+  Passed TeamForMe.Algorithms.Tests.HorizontalAutoscalerTests.Calcula_replicas_deseadas_con_la_formula_del_HPA(current: 3, load: 200, expected: 7) [< 1 ms]
+  Passed TeamForMe.Algorithms.Tests.HorizontalAutoscalerTests.Calcula_replicas_deseadas_con_la_formula_del_HPA(current: 2, load: 90, expected: 3) [< 1 ms]
+  Passed TeamForMe.Algorithms.Tests.HorizontalAutoscalerTests.Calcula_replicas_deseadas_con_la_formula_del_HPA(current: 4, load: 125, expected: 4) [< 1 ms]
+  Passed TeamForMe.Algorithms.Tests.TokenBucketTests.Se_rellena_con_el_tiempo_sin_superar_la_capacidad [< 1 ms]
+  Passed TeamForMe.Algorithms.Tests.HorizontalAutoscalerTests.Escala_desde_cero_y_respeta_el_maximo [< 1 ms]
+  Passed TeamForMe.Algorithms.Tests.LoadBalancerTests.LeastConnections_evita_el_backend_ocupado [< 1 ms]
+  Passed TeamForMe.Algorithms.Tests.HorizontalAutoscalerTests.Estabilizacion_retrasa_la_bajada_cinco_minutos [1 ms]
+  Passed TeamForMe.Algorithms.Tests.LoadBalancerTests.Simulacion_round_robin_degrada_con_replicas_heterogeneas [20 ms]
+  Passed TeamForMe.Algorithms.Tests.LoadBalancerTests.WeightedRoundRobin_respeta_pesos_e_intercala [< 1 ms]
+Test Run Successful.
+Total tests: 12
+     Passed: 12
+ Total time: 0.5572 Seconds

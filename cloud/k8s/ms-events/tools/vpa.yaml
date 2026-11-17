@@ -1,0 +1,23 @@
+# Escalado VERTICAL: Vertical Pod Autoscaler en modo recomendación ("Off").
+# Observa el consumo real y recomienda requests de CPU/memoria (right-sizing) sin
+# reiniciar pods. Requiere el add-on VPA:
+#   AKS:   az aks update -g <rg> -n <aks> --enable-vpa
+#   Ver:   kubectl describe vpa ms-events -n teamforme
+# No combinar VPA en modo "Auto" con un HPA basado en la misma métrica (CPU/memoria).
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: ms-events
+  namespace: teamforme
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: ms-events
+  updatePolicy:
+    updateMode: "Off"
+  resourcePolicy:
+    containerPolicies:
+      - containerName: ms-events
+        minAllowed: { cpu: 25m, memory: 64Mi }
+        maxAllowed: { cpu: "1", memory: 512Mi }

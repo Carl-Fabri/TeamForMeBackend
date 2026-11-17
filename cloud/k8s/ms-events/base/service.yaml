@@ -1,0 +1,14 @@
+# Service ClusterIP: IP virtual estable que balancea entre las réplicas "Ready".
+apiVersion: v1
+kind: Service
+metadata:
+  name: ms-events
+  namespace: teamforme
+  labels:
+    app.kubernetes.io/name: ms-events
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: ms-events
+  ports:
+    - { name: http, port: 80, targetPort: http }

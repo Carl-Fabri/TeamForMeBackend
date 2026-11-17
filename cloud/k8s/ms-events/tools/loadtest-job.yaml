@@ -1,0 +1,23 @@
+# Generador de carga para observar el HPA en acción.
+#   kubectl apply -f k8s/ms-events/tools/loadtest-job.yaml
+#   kubectl get hpa ms-events -n teamforme --watch
+#   kubectl delete job loadtest -n teamforme
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: loadtest
+  namespace: teamforme
+spec:
+  parallelism: 4
+  completions: 4
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: hey
+          image: williamyeh/hey:latest
+          args: ["-z", "3m", "-c", "50", "http://ms-events.teamforme.svc.cluster.local/events"]
+          resources:
+            requests: { cpu: 100m, memory: 32Mi }
+            limits: { cpu: 500m, memory: 64Mi }

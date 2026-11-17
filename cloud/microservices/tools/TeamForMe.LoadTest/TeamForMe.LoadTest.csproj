@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Generador de carga para las demostraciones de autoescalado, balanceo, rate limiting
+       y canary. Solo necesita el runtime de .NET (no ASP.NET). -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>tfm-load</AssemblyName>
+  </PropertyGroup>
+
+</Project>
