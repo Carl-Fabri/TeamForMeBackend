@@ -1,0 +1,29 @@
+# Prometheus — base de datos de series temporales (TSDB) de TeamForMe (docker compose).
+# Cada 15 s "raspa" (scrape) /metrics de todas las réplicas de cada microservicio.
+# dns_sd_configs resuelve el nombre del servicio a TODAS las IPs de sus réplicas, así que
+# al hacer `docker compose up --scale ms-events=3` las réplicas nuevas aparecen solas
+# (y las eliminadas desaparecen) en como máximo refresh_interval = 10 s.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    system: teamforme
+
+rule_files:
+  - /etc/prometheus/rules.yml
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: ms-events
+    dns_sd_configs: [{ names: [ms-events], type: A, port: 8080, refresh_interval: 10s }]
+  - job_name: ms-teams
+    dns_sd_configs: [{ names: [ms-teams], type: A, port: 8080, refresh_interval: 10s }]
+  - job_name: ms-applications
+    dns_sd_configs: [{ names: [ms-applications], type: A, port: 8080, refresh_interval: 10s }]
+  - job_name: ms-users
+    dns_sd_configs: [{ names: [ms-users], type: A, port: 8080, refresh_interval: 10s }]
+  - job_name: ms-notifications
+    dns_sd_configs: [{ names: [ms-notifications], type: A, port: 8080, refresh_interval: 10s }]

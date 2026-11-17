@@ -1,0 +1,91 @@
+# API Gateway de TeamForMe (nginx).
+# Punto de entrada único: /api/* se enruta al microservicio dueño del recurso.
+# Las variables ${..._UPSTREAM} se sustituyen al arrancar (envsubst de la imagen oficial):
+#   - docker compose:   http://ms-events:8080
+#   - Container Apps:   http://ms-events.internal.<dominio-del-entorno>   (FQDN interno)
+#
+# Estrategia de balanceo: cada upstream es un nombre DNS que se guarda en una VARIABLE.
+# Con proxy_pass a una variable, nginx vuelve a resolver el nombre con el "resolver" (cada
+# 10 s) en vez de fijar una sola IP al arrancar: las réplicas nuevas del autoescalado entran
+# en el reparto y las eliminadas salen. En compose el DNS devuelve todas las IPs de las
+# réplicas y nginx alterna entre ellas; en Container Apps el FQDN apunta a Envoy, que
+# balancea (round robin). El resolver no usa dominios de búsqueda, por eso en Azure se pasa
+# el FQDN completo.
+
+server {
+    listen 8080;
+    server_tokens off;
+
+    # NGINX_LOCAL_RESOLVERS lo calcula la imagen oficial a partir de /etc/resolv.conf.
+    resolver ${NGINX_LOCAL_RESOLVERS} valid=10s ipv6=off;
+
+    set $events_upstream        ${EVENTS_UPSTREAM};
+    set $teams_upstream         ${TEAMS_UPSTREAM};
+    set $applications_upstream  ${APPLICATIONS_UPSTREAM};
+    set $users_upstream         ${USERS_UPSTREAM};
+    set $notifications_upstream ${NOTIFICATIONS_UPSTREAM};
+    set $frontend_upstream      ${FRONTEND_UPSTREAM};
+
+    proxy_http_version 1.1;
+    proxy_connect_timeout 5s;
+    proxy_read_timeout 30s;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-User-Id $http_x_user_id;
+
+    location = /health { return 200 'ok'; add_header Content-Type text/plain; }
+
+    # Diagnóstico: /info de la réplica que atendió (hostname, versión, uso de Key Vault).
+    # Las coincidencias exactas (=) tienen prioridad sobre las regex.
+    location = /api/events/_info        { proxy_pass $events_upstream/info; }
+    location = /api/teams/_info         { proxy_pass $teams_upstream/info; }
+    location = /api/applications/_info  { proxy_pass $applications_upstream/info; }
+    location = /api/users/_info         { proxy_pass $users_upstream/info; }
+    location = /api/notifications/_info { proxy_pass $notifications_upstream/info; }
+
+    # Las reglas regex se evalúan en orden y gana la primera que coincide.
+    # 1) Las rutas /internal/* (servicio a servicio) nunca se exponen hacia fuera.
+    location ~ /internal(/|$) { return 404; }
+
+    # 2) Rutas anidadas más específicas antes que las generales.
+    location ~ ^/api/events/[^/]+/teams$ {
+        rewrite ^/api/(.*)$ /$1 break;
+        proxy_pass $teams_upstream;
+    }
+    location ~ ^/api/teams/[^/]+/applications$ {
+        rewrite ^/api/(.*)$ /$1 break;
+        proxy_pass $applications_upstream;
+    }
+    location ~ ^/api/users/[^/]+/notifications$ {
+        rewrite ^/api/(.*)$ /$1 break;
+        proxy_pass $notifications_upstream;
+    }
+    # Laboratorio de algoritmos de infraestructura (balanceo, autoescalado, resiliencia).
+    location ~ ^/api/lab(/|$) {
+        rewrite ^/api/(.*)$ /$1 break;
+        proxy_pass $events_upstream;
+        proxy_read_timeout 120s; # /lab/resilience con pausas puede tardar ~1 min
+    }
+    location ~ ^/api/events {
+        rewrite ^/api/(.*)$ /$1 break;
+        proxy_pass $events_upstream;
+    }
+    location ~ ^/api/teams {
+        rewrite ^/api/(.*)$ /$1 break;
+        proxy_pass $teams_upstream;
+    }
+    location ~ ^/api/applications {
+        rewrite ^/api/(.*)$ /$1 break;
+        proxy_pass $applications_upstream;
+    }
+    location ~ ^/api/users {
+        rewrite ^/api/(.*)$ /$1 break;
+        proxy_pass $users_upstream;
+    }
+
+    # Todo lo demás es el frontend Angular (SSR). No se sobrescribe Host: en Container Apps
+    # el proxy Envoy enruta por Host, así que debe llegar el del upstream (valor por defecto).
+    location / {
+        proxy_pass $frontend_upstream;
+    }
+}

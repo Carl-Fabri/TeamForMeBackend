@@ -1,0 +1,264 @@
+// Azure Container Apps: orquestador serverless basado en Kubernetes + KEDA + Envoy.
+// Cada microservicio es una Container App con su propia regla de escalado (elasticidad).
+param location string
+param environmentName string
+param logAnalyticsName string
+param identityId string
+param identityClientId string
+param registryServer string
+param keyVaultUri string
+param imageTag string
+
+resource logs 'Microsoft.OperationalInsights/workspaces@2023-09-01' existing = {
+  name: logAnalyticsName
+}
+
+resource environment 'Microsoft.App/managedEnvironments@2024-03-01' = {
+  name: environmentName
+  location: location
+  properties: {
+    appLogsConfiguration: {
+      destination: 'log-analytics'
+      logAnalyticsConfiguration: {
+        customerId: logs.properties.customerId
+        sharedKey: logs.listKeys().primarySharedKey
+      }
+    }
+  }
+}
+
+// Variables comunes de los microservicios .NET: Key Vault vía SDK + identidad administrada.
+var dotnetEnv = [
+  { name: 'ASPNETCORE_ENVIRONMENT', value: 'Production' }
+  { name: 'KeyVault__Uri', value: keyVaultUri }
+  { name: 'AZURE_CLIENT_ID', value: identityClientId }
+  { name: 'APP_VERSION', value: imageTag }
+]
+
+var dotnetProbes = [
+  { type: 'Liveness', httpGet: { path: '/health/live', port: 8080 }, periodSeconds: 10 }
+  { type: 'Readiness', httpGet: { path: '/health/ready', port: 8080 }, periodSeconds: 5 }
+]
+
+// Regla de escalado HTTP (KEDA): +1 réplica por cada 30 peticiones concurrentes.
+var httpScaleRule = [
+  { name: 'http-concurrency', http: { metadata: { concurrentRequests: '30' } } }
+]
+
+// El resolver de nginx no aplica dominios de búsqueda: el gateway necesita el FQDN interno.
+// Va fuera de "apps" porque defaultDomain solo se conoce en tiempo de despliegue y el arreglo
+// de un loop debe poder calcularse al inicio.
+var internalSuffix = 'internal.${environment.properties.defaultDomain}'
+var gatewayEnv = [
+  { name: 'EVENTS_UPSTREAM', value: 'http://ms-events.${internalSuffix}' }
+  { name: 'TEAMS_UPSTREAM', value: 'http://ms-teams.${internalSuffix}' }
+  { name: 'APPLICATIONS_UPSTREAM', value: 'http://ms-applications.${internalSuffix}' }
+  { name: 'USERS_UPSTREAM', value: 'http://ms-users.${internalSuffix}' }
+  { name: 'NOTIFICATIONS_UPSTREAM', value: 'http://ms-notifications.${internalSuffix}' }
+  { name: 'FRONTEND_UPSTREAM', value: 'http://frontend.${internalSuffix}' }
+]
+
+// Catálogo de apps. minReplicas 0 = "scale to zero": sin tráfico no consume (ni cobra) CPU.
+// Los servicios con estado en memoria (teams, applications, notifications) se fijan en 1 réplica.
+//
+// ms-events es el servicio de demostración de los algoritmos de infraestructura:
+//   - revisions 'Multiple': varias revisiones activas a la vez con reparto de tráfico por
+//     pesos → despliegue canary / blue-green (scripts/azure/canary.ps1).
+//   - max 10 réplicas con la regla KEDA HTTP (autoescalado: ⌈concurrentes / 30⌉).
+//   - RateLimit__*: token bucket por cliente (ráfaga 100, 50 peticiones/s).
+var multiRevisionApps = ['ms-events']
+
+var apps = [
+  {
+    name: 'ms-events'
+    image: 'teamforme/ms-events'
+    port: 8080
+    external: false
+    cpu: '0.25'
+    memory: '0.5Gi'
+    min: 0
+    max: 10
+    rules: httpScaleRule
+    env: concat(dotnetEnv, [
+      { name: 'RateLimit__Capacity', value: '100' }
+      { name: 'RateLimit__RefillPerSecond', value: '50' }
+      { name: 'Lab__SelfUrl', value: 'http://localhost:8080' }
+    ])
+    probes: dotnetProbes
+    secrets: []
+  }
+  {
+    name: 'ms-users'
+    image: 'teamforme/ms-users'
+    port: 8080
+    external: false
+    cpu: '0.25'
+    memory: '0.5Gi'
+    min: 0
+    max: 3
+    rules: httpScaleRule
+    env: dotnetEnv
+    probes: dotnetProbes
+    secrets: []
+  }
+  {
+    name: 'ms-teams'
+    image: 'teamforme/ms-teams'
+    port: 8080
+    external: false
+    cpu: '0.25'
+    memory: '0.5Gi'
+    min: 1
+    max: 1
+    rules: []
+    env: dotnetEnv
+    probes: dotnetProbes
+    secrets: []
+  }
+  {
+    name: 'ms-notifications'
+    image: 'teamforme/ms-notifications'
+    port: 8080
+    external: false
+    cpu: '0.25'
+    memory: '0.5Gi'
+    min: 1
+    max: 1
+    rules: []
+    env: dotnetEnv
+    probes: dotnetProbes
+    secrets: []
+  }
+  {
+    name: 'ms-applications'
+    image: 'teamforme/ms-applications'
+    port: 8080
+    external: false
+    cpu: '0.25'
+    memory: '0.5Gi'
+    min: 1
+    max: 1
+    rules: []
+    env: concat(dotnetEnv, [
+      { name: 'Services__Teams', value: 'http://ms-teams' }
+      { name: 'Services__Notifications', value: 'http://ms-notifications' }
+    ])
+    probes: dotnetProbes
+    secrets: []
+  }
+  {
+    name: 'frontend'
+    image: 'teamforme/frontend'
+    port: 4000
+    external: false
+    cpu: '0.5'
+    memory: '1Gi'
+    min: 0
+    max: 3
+    rules: httpScaleRule
+    env: [
+      { name: 'PORT', value: '4000' }
+      { name: 'NG_ALLOWED_HOSTS', value: 'frontend' }
+    ]
+    probes: []
+    secrets: []
+  }
+  {
+    name: 'gateway'
+    image: 'teamforme/gateway'
+    port: 8080
+    external: true
+    cpu: '0.25'
+    memory: '0.5Gi'
+    min: 1
+    max: 5
+    rules: httpScaleRule
+    // Se reemplaza por gatewayEnv en el loop (depende del dominio del entorno).
+    env: []
+    probes: [
+      { type: 'Liveness', httpGet: { path: '/health', port: 8080 }, periodSeconds: 10 }
+    ]
+    secrets: []
+  }
+  {
+    name: 'prometheus'
+    image: 'teamforme/prometheus'
+    port: 9090
+    external: false
+    cpu: '0.25'
+    memory: '0.5Gi'
+    min: 1
+    max: 1
+    rules: []
+    env: []
+    probes: []
+    secrets: []
+  }
+  {
+    name: 'grafana'
+    image: 'teamforme/grafana'
+    port: 3000
+    external: true
+    cpu: '0.25'
+    memory: '0.5Gi'
+    min: 1
+    max: 1
+    rules: []
+    env: [
+      { name: 'PROMETHEUS_URL', value: 'http://prometheus' }
+      // Referencia a Key Vault resuelta por la PLATAFORMA (sin SDK en la app).
+      { name: 'GF_SECURITY_ADMIN_PASSWORD', secretRef: 'grafana-admin-password' }
+      { name: 'GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH', value: '/var/lib/grafana/dashboards/teamforme-overview.json' }
+    ]
+    probes: []
+    secrets: [
+      { name: 'grafana-admin-password', keyVaultUrl: '${keyVaultUri}secrets/grafana-admin-password', identity: identityId }
+    ]
+  }
+]
+
+resource containerApps 'Microsoft.App/containerApps@2024-03-01' = [for app in apps: {
+  name: app.name
+  location: location
+  identity: {
+    type: 'UserAssigned'
+    userAssignedIdentities: { '${identityId}': {} }
+  }
+  properties: {
+    managedEnvironmentId: environment.id
+    configuration: {
+      activeRevisionsMode: contains(multiRevisionApps, app.name) ? 'Multiple' : 'Single'
+      ingress: {
+        external: app.external
+        targetPort: app.port
+        transport: 'auto'
+        // Tráfico interno por HTTP dentro del entorno (Envoy); el externo siempre por HTTPS.
+        allowInsecure: !app.external
+      }
+      registries: [
+        { server: registryServer, identity: identityId }
+      ]
+      secrets: app.secrets
+    }
+    template: {
+      containers: [
+        {
+          name: app.name
+          image: '${registryServer}/${app.image}:${imageTag}'
+          resources: { cpu: json(app.cpu), memory: app.memory }
+          env: app.name == 'gateway' ? gatewayEnv : app.env
+          probes: app.probes
+        }
+      ]
+      scale: {
+        minReplicas: app.min
+        maxReplicas: app.max
+        rules: app.rules
+      }
+    }
+  }
+}]
+
+output environmentId string = environment.id
+output gatewayUrl string = 'https://${containerApps[6].properties.configuration.ingress.fqdn}'
+output grafanaUrl string = 'https://${containerApps[8].properties.configuration.ingress.fqdn}'

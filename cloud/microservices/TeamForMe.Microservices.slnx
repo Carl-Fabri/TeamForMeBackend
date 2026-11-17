@@ -1,0 +1,16 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/TeamForMe.Shared/TeamForMe.Shared.csproj" />
+    <Project Path="src/MS.Events/MS.Events.csproj" />
+    <Project Path="src/MS.Teams/MS.Teams.csproj" />
+    <Project Path="src/MS.Applications/MS.Applications.csproj" />
+    <Project Path="src/MS.Users/MS.Users.csproj" />
+    <Project Path="src/MS.Notifications/MS.Notifications.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/TeamForMe.Algorithms.Tests/TeamForMe.Algorithms.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tools/">
+    <Project Path="tools/TeamForMe.LoadTest/TeamForMe.LoadTest.csproj" />
+  </Folder>
+</Solution>

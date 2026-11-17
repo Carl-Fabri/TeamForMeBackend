@@ -7,6 +7,9 @@
     <UserSecretsId>ba418e0b-4de6-4135-9a7c-9404fde84d01</UserSecretsId>
     <DockerDefaultTargetOS>Linux</DockerDefaultTargetOS>
     <DockerfileContext>.</DockerfileContext>
+    <!-- cloud/ contiene los microservicios, la infraestructura y su propia solución:
+         no forma parte de este proyecto gRPC. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);cloud/**</DefaultItemExcludes>
   </PropertyGroup>
 
   <ItemGroup>

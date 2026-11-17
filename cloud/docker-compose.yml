@@ -1,0 +1,121 @@
+# TeamForMe — entorno local completo (equivalente a la topología de Azure).
+#
+#   docker compose up -d --build
+#   docker compose up -d --scale ms-events=3     # escalado horizontal manual
+#
+#   Gateway (frontend + /api) ... http://localhost:8080
+#   Prometheus (TSDB) ........... http://localhost:9090
+#   Grafana (dashboards) ........ http://localhost:3000   (admin / admin)
+#
+# Asignación de recursos: cada servicio declara límites (techo) y reservas (piso) de CPU y
+# memoria, igual que requests/limits en Kubernetes o cpu/memory en Container Apps.
+
+x-microservice: &microservice
+  build:
+    context: ./microservices
+  restart: unless-stopped
+  environment: &ms-env
+    ASPNETCORE_ENVIRONMENT: Development
+    # En local el secreto interno viene de .env; en Azure lo entrega Key Vault.
+    Internal__ApiKey: ${INTERNAL_API_KEY:-dev-internal-key-change-me}
+    KeyVault__Uri: ${KEYVAULT_URI:-}
+    # Solo en una VM de Azure con identidad administrada asignada por el usuario.
+    AZURE_CLIENT_ID: ${AZURE_CLIENT_ID:-}
+  healthcheck:
+    test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/8080 && printf \"GET /health/live HTTP/1.0\\r\\n\\r\\n\" >&3 && grep -q 200 <&3'"]
+    interval: 15s
+    timeout: 3s
+    retries: 3
+  deploy: &ms-deploy
+    resources:
+      limits: { cpus: "0.50", memory: 256M }
+      reservations: { cpus: "0.10", memory: 96M }
+
+services:
+  ms-events:
+    <<: *microservice
+    build: { context: ./microservices, args: { SERVICE: MS.Events } }
+    image: teamforme/ms-events:local
+    # Servicio sin estado: admite varias réplicas detrás del DNS del servicio.
+    deploy:
+      <<: *ms-deploy
+      replicas: 2
+
+  ms-users:
+    <<: *microservice
+    build: { context: ./microservices, args: { SERVICE: MS.Users } }
+    image: teamforme/ms-users:local
+
+  ms-teams:
+    <<: *microservice
+    build: { context: ./microservices, args: { SERVICE: MS.Teams } }
+    image: teamforme/ms-teams:local
+
+  ms-notifications:
+    <<: *microservice
+    build: { context: ./microservices, args: { SERVICE: MS.Notifications } }
+    image: teamforme/ms-notifications:local
+
+  ms-applications:
+    <<: *microservice
+    build: { context: ./microservices, args: { SERVICE: MS.Applications } }
+    image: teamforme/ms-applications:local
+    environment:
+      <<: *ms-env
+      Services__Teams: http://ms-teams:8080
+      Services__Notifications: http://ms-notifications:8080
+      Applications__ResolveDelaySeconds: "6"
+    depends_on: [ms-teams, ms-notifications]
+
+  frontend:
+    build: { context: ./TeamForMeFrontend }
+    image: teamforme/frontend:local
+    restart: unless-stopped
+    environment:
+      PORT: "4000"
+      NG_ALLOWED_HOSTS: "frontend,localhost"
+    deploy:
+      resources:
+        limits: { cpus: "0.50", memory: 384M }
+
+  gateway:
+    build: { context: ./gateway }
+    image: teamforme/gateway:local
+    restart: unless-stopped
+    ports: ["${GATEWAY_PORT:-8080}:8080"]
+    depends_on: [ms-events, ms-users, ms-teams, ms-applications, ms-notifications, frontend]
+    deploy:
+      resources:
+        limits: { cpus: "0.25", memory: 64M }
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      # Retención de la TSDB: 7 días o 1 GB, lo que ocurra primero.
+      - --storage.tsdb.retention.time=7d
+      - --storage.tsdb.retention.size=1GB
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/prometheus/rules.yml:/etc/prometheus/rules.yml:ro
+      - prometheus-data:/prometheus
+    ports: ["${PROMETHEUS_PORT:-9090}:9090"]
+
+  grafana:
+    image: grafana/grafana:12.1.0
+    restart: unless-stopped
+    environment:
+      PROMETHEUS_URL: http://prometheus:9090
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/teamforme-overview.json
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports: ["${GRAFANA_PORT:-3000}:3000"]
+    depends_on: [prometheus]
+
+volumes:
+  prometheus-data:
+  grafana-data:

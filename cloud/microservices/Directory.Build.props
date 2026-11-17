@@ -1,0 +1,13 @@
+<Project>
+  <!-- Configuración común a todos los microservicios de TeamForMe. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- Recolector de basura en modo "workstation" + concurrente: menor huella de memoria
+         por réplica, lo que permite empaquetar más réplicas por nodo (bin packing). -->
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+  </PropertyGroup>
+</Project>

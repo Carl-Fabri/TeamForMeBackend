@@ -1,0 +1,10 @@
+# Configuración no sensible. Los secretos NO van aquí: vienen de Azure Key Vault.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ms-events-config
+  namespace: teamforme
+data:
+  ASPNETCORE_ENVIRONMENT: Production
+  Cors__AllowedOrigins: "*"
+  KeyVault__Uri: ""
