@@ -18,6 +18,9 @@ param frontendUrl string = ''
 @description('Nombre de un Container Apps Environment existente del grupo de recursos para reutilizarlo. Azure for Students permite 1 entorno por región. Vacío = crear environmentName.')
 param existingEnvironmentName string = ''
 
+@description('Revisiones múltiples en ms-events (canary / blue-green). Los entornos express no lo admiten (ExpressMultiRevisionModeNotSupported): solo true en un entorno estándar.')
+param multipleRevisions bool = false
+
 var useExistingFrontend = !empty(frontendUrl)
 var useExistingEnvironment = !empty(existingEnvironmentName)
 
@@ -106,11 +109,12 @@ var domainEnv = {
 // Los servicios con estado en memoria (teams, applications, notifications) se fijan en 1 réplica.
 //
 // ms-events es el servicio de demostración de los algoritmos de infraestructura:
-//   - revisions 'Multiple': varias revisiones activas a la vez con reparto de tráfico por
-//     pesos → despliegue canary / blue-green (scripts/azure/canary.ps1).
+//   - revisions 'Multiple' (solo con multipleRevisions=true, en un entorno estándar): varias
+//     revisiones activas a la vez con reparto de tráfico por pesos → despliegue canary /
+//     blue-green (scripts/azure/canary.ps1). En el entorno express compartido va en 'Single'.
 //   - max 10 réplicas con la regla KEDA HTTP (autoescalado: ⌈concurrentes / 30⌉).
 //   - RateLimit__*: token bucket por cliente (ráfaga 100, 50 peticiones/s).
-var multiRevisionApps = ['ms-events']
+var multiRevisionApps = multipleRevisions ? ['ms-events'] : []
 
 var allApps = [
   {

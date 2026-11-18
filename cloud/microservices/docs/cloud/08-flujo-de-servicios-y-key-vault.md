@@ -131,6 +131,11 @@ rechaza dos opciones que usaba la versión anterior:
 |---|---|---|
 | `ExpressAllowInsecureNotSupported` | `ingress.allowInsecure: true` en las apps internas | `allowInsecure: false` en todas. Las llamadas internas pasan a `https://<app>.internal.<dominio>` (gateway, `Services__*`, Grafana y Prometheus) |
 | `ExpressKeyVaultSecretsNotSupported` | secret de Grafana con `keyVaultUrl` | Referencia de Key Vault **en el despliegue** (`getSecret`) en lugar de en tiempo de ejecución |
+| `ExpressMultiRevisionModeNotSupported` | `ms-events` con `activeRevisionsMode: Multiple` | `Single` por defecto. El parámetro `multipleRevisions=true` lo reactiva, pero solo funciona en un entorno estándar; `scripts/azure/canary.ps1` (canary / blue-green) también lo necesita |
+
+Si un intento anterior falló a medias, Azure puede tener una app pendiente de borrar y el
+siguiente despliegue recibe `Conflict ... pending delete operation`. Es transitorio: el job
+*Bicep · fase 2* de `infra.yml` lo reintenta hasta 3 veces, con 90 s de espera entre intentos.
 
 Prometheus necesita el dominio del entorno para sus *targets*: `containerapps.bicep` le pasa
 `INTERNAL_SUFFIX` y `observability/prometheus/entrypoint.sh` genera la configuración al arrancar.

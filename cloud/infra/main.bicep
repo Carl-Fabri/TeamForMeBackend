@@ -26,6 +26,9 @@ param frontendUrl string = ''
 @description('Container Apps Environment existente a reutilizar (Azure for Students permite 1 por región). Vacío = crear cae-<prefix>.')
 param existingEnvironmentName string = ''
 
+@description('Revisiones múltiples en ms-events (canary). false en entornos express, que no lo admiten.')
+param multipleRevisions bool = false
+
 @secure()
 @description('Secreto compartido entre microservicios. Se guarda en Key Vault como Internal--ApiKey.')
 param internalApiKey string
@@ -107,6 +110,7 @@ module containerApps 'modules/containerapps.bicep' = if (deployApps) {
     grafanaAdminPassword: vault.getSecret('grafana-admin-password')
     frontendUrl: frontendUrl
     existingEnvironmentName: existingEnvironmentName
+    multipleRevisions: multipleRevisions
   }
 }
 

@@ -202,11 +202,26 @@ jobs:
           FRONTEND_URL: ${{ steps.frontend.outputs.url }}
           EXISTING_ENV: ${{ steps.frontend.outputs.environment }}
         run: |
-          out=$(az deployment group create -g "$RESOURCE_GROUP" -n teamforme-apps \
-            -f cloud/infra/main.bicep -p cloud/infra/main.bicepparam \
-            -p deployApps=true imageTag="$TAG" prefix="$PREFIX" location="$LOCATION" deployAks="$DEPLOY_AKS" \
-               frontendUrl="$FRONTEND_URL" existingEnvironmentName="$EXISTING_ENV" \
-            --query properties.outputs -o json)
+          # Tras un despliegue fallido Azure puede tener aún una app "pendiente de borrar":
+          # el siguiente intento recibe Conflict ("resource already exists ... pending delete").
+          # Ese error es transitorio, así que se reintenta (máx. 3 veces, 90 s de espera).
+          # Cualquier otro error falla de inmediato.
+          for attempt in 1 2 3; do
+            if out=$(az deployment group create -g "$RESOURCE_GROUP" -n teamforme-apps \
+                -f cloud/infra/main.bicep -p cloud/infra/main.bicepparam \
+                -p deployApps=true imageTag="$TAG" prefix="$PREFIX" location="$LOCATION" deployAks="$DEPLOY_AKS" \
+                   frontendUrl="$FRONTEND_URL" existingEnvironmentName="$EXISTING_ENV" \
+                --query properties.outputs -o json 2>deploy-error.log); then
+              break
+            fi
+            cat deploy-error.log >&2
+            if [ "$attempt" -lt 3 ] && grep -q "pending delete" deploy-error.log; then
+              echo "::warning::Intento $attempt: recurso pendiente de borrado en Azure; reintento en 90 s"
+              sleep 90
+            else
+              exit 1
+            fi
+          done
           gw=$(jq -r .gatewayUrl.value <<<"$out"); gf=$(jq -r .grafanaUrl.value <<<"$out")
           echo "gateway_url=$gw" >> "$GITHUB_OUTPUT"
           echo "grafana_url=$gf" >> "$GITHUB_OUTPUT"
