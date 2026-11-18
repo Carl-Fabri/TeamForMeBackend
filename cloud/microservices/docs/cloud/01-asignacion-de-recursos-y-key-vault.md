@@ -87,14 +87,22 @@ Key Vault, con control de acceso RBAC, auditoría, versionado y *soft delete*.
 | Secreto en Key Vault | Clave .NET | Quién lo usa | Cómo llega |
 |---|---|---|---|
 | `Internal--ApiKey` | `Internal:ApiKey` | Los 5 microservicios (autenticación servicio a servicio) | **SDK** en la app (`KeyVaultConfiguration.cs`) |
-| `grafana-admin-password` | — | Grafana | **Referencia de la plataforma** (secret de Container Apps con `keyVaultUrl`) |
+| `grafana-admin-password` | — | Grafana | **Referencia de ARM en el despliegue** (`getSecret` en `main.bicep` → secret de Container Apps) |
 
 Se muestran dos patrones de consumo:
 
 1. **Desde la aplicación (SDK):** `builder.Configuration.AddAzureKeyVault(uri, new DefaultAzureCredential())`.
    La app lee el vault al arrancar y cada 5 minutos (rotación sin reinicio).
-2. **Desde la plataforma:** Container Apps resuelve el secreto y lo inyecta como variable de
-   entorno. La app (Grafana) no sabe que existe Key Vault.
+2. **Desde el despliegue (referencia de ARM):** `main.bicep` lee el secreto con
+   `vault.getSecret('grafana-admin-password')` y lo entrega como *secret* de Container Apps, que
+   lo inyecta como variable de entorno. La app (Grafana) no sabe que existe Key Vault y el valor
+   nunca pasa por el pipeline. Requiere `enabledForTemplateDeployment: true` en el vault y que
+   quien despliega tenga `Microsoft.KeyVault/vaults/deploy/action` (incluido en *Contributor*).
+   Para rotarlo: actualizar el secreto en Key Vault y volver a desplegar.
+
+   > Antes se usaba un *secret* con `keyVaultUrl` (Container Apps lo resuelve en tiempo de
+   > ejecución). Los entornos **express** de Container Apps no lo admiten
+   > (`ExpressKeyVaultSecretsNotSupported`), y el backend comparte el entorno express del frontend.
 
 En AKS el patrón es el 1 con **Workload Identity**. La alternativa sería el *Secrets Store CSI
 Driver*, que monta los secretos como archivos.
