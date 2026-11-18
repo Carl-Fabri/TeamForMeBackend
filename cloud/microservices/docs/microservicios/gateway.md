@@ -30,10 +30,13 @@ La imagen oficial de nginx procesa `/etc/nginx/templates/*.template` con `envsub
 
 | Variable | Docker Compose | Azure Container Apps |
 |---|---|---|
-| `EVENTS_UPSTREAM` | `http://ms-events:8080` | `http://ms-events.internal.<defaultDomain>` |
-| `TEAMS_UPSTREAM` | `http://ms-teams:8080` | `http://ms-teams.internal.<defaultDomain>` |
-| `FRONTEND_UPSTREAM` | `http://frontend:4000` | `http://frontend.internal.<defaultDomain>` |
+| `EVENTS_UPSTREAM` | `http://ms-events:8080` | `https://ms-events.internal.<defaultDomain>` |
+| `TEAMS_UPSTREAM` | `http://ms-teams:8080` | `https://ms-teams.internal.<defaultDomain>` |
+| `FRONTEND_UPSTREAM` | `http://frontend:4000` | URL pública del frontend existente, o `https://frontend.internal.<defaultDomain>` |
 | … | … | … |
+
+En Azure los upstreams son **HTTPS**: el entorno express no admite `allowInsecure`, así que una
+llamada HTTP recibiría una redirección 301. `proxy_ssl_server_name on` envía el SNI correcto.
 
 No se sobrescribe la cabecera `Host`: en Container Apps el proxy Envoy enruta por `Host`, así que
 debe llegar el nombre del upstream (comportamiento por defecto de `proxy_pass`).

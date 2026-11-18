@@ -8,6 +8,10 @@ param identityClientId string
 param registryServer string
 param keyVaultUri string
 param imageTag string
+
+@secure()
+@description('Contraseña de Grafana. main.bicep la lee de Key Vault en el despliegue (getSecret), no del pipeline.')
+param grafanaAdminPassword string
 @description('URL de un frontend ya desplegado (p. ej. https://teamforme-frontend.<dominio>). Si se indica, no se crea la app "frontend" y el gateway envía "/" a esa URL. Vacío = crear la app "frontend" en este entorno.')
 param frontendUrl string = ''
 
@@ -60,19 +64,43 @@ var httpScaleRule = [
   { name: 'http-concurrency', http: { metadata: { concurrentRequests: '30' } } }
 ]
 
-// El resolver de nginx no aplica dominios de búsqueda: el gateway necesita el FQDN interno.
+// Tráfico entre apps: HTTPS al FQDN interno (https://<app>.internal.<dominio>).
+// Los entornos "express" de Container Apps (como el del frontend que se reutiliza) no admiten
+// allowInsecure, así que una llamada HTTP se redirigiría (301) a HTTPS. Con el FQDN completo el
+// certificado del entorno es válido. Además el resolver de nginx no aplica dominios de búsqueda.
 // Va fuera de "apps" porque defaultDomain solo se conoce en tiempo de despliegue y el arreglo
 // de un loop debe poder calcularse al inicio.
 var internalSuffix = 'internal.${environmentDomain}'
+func internalUrl(app string, suffix string) string => 'https://${app}.${suffix}'
+
 var gatewayEnv = [
-  { name: 'EVENTS_UPSTREAM', value: 'http://ms-events.${internalSuffix}' }
-  { name: 'TEAMS_UPSTREAM', value: 'http://ms-teams.${internalSuffix}' }
-  { name: 'APPLICATIONS_UPSTREAM', value: 'http://ms-applications.${internalSuffix}' }
-  { name: 'USERS_UPSTREAM', value: 'http://ms-users.${internalSuffix}' }
-  { name: 'NOTIFICATIONS_UPSTREAM', value: 'http://ms-notifications.${internalSuffix}' }
+  { name: 'EVENTS_UPSTREAM', value: internalUrl('ms-events', internalSuffix) }
+  { name: 'TEAMS_UPSTREAM', value: internalUrl('ms-teams', internalSuffix) }
+  { name: 'APPLICATIONS_UPSTREAM', value: internalUrl('ms-applications', internalSuffix) }
+  { name: 'USERS_UPSTREAM', value: internalUrl('ms-users', internalSuffix) }
+  { name: 'NOTIFICATIONS_UPSTREAM', value: internalUrl('ms-notifications', internalSuffix) }
   // Frontend existente (otro entorno, otro repositorio): se alcanza por su URL pública HTTPS.
-  { name: 'FRONTEND_UPSTREAM', value: useExistingFrontend ? frontendUrl : 'http://frontend.${internalSuffix}' }
+  { name: 'FRONTEND_UPSTREAM', value: useExistingFrontend ? frontendUrl : internalUrl('frontend', internalSuffix) }
 ]
+
+// Variables que dependen del dominio del entorno, por app. Se aplican en el loop en lugar de
+// app.env (mismo motivo que gatewayEnv).
+var domainEnv = {
+  gateway: gatewayEnv
+  'ms-applications': concat(dotnetEnv, [
+    { name: 'Services__Teams', value: internalUrl('ms-teams', internalSuffix) }
+    { name: 'Services__Notifications', value: internalUrl('ms-notifications', internalSuffix) }
+  ])
+  // prometheus.aca.yml usa ${INTERNAL_SUFFIX}; el entrypoint de la imagen lo sustituye al arrancar.
+  prometheus: [
+    { name: 'INTERNAL_SUFFIX', value: internalSuffix }
+  ]
+  grafana: [
+    { name: 'PROMETHEUS_URL', value: internalUrl('prometheus', internalSuffix) }
+    { name: 'GF_SECURITY_ADMIN_PASSWORD', secretRef: 'grafana-admin-password' }
+    { name: 'GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH', value: '/var/lib/grafana/dashboards/teamforme-overview.json' }
+  ]
+}
 
 // Catálogo de apps. minReplicas 0 = "scale to zero": sin tráfico no consume (ni cobra) CPU.
 // Los servicios con estado en memoria (teams, applications, notifications) se fijan en 1 réplica.
@@ -155,10 +183,8 @@ var allApps = [
     min: 1
     max: 1
     rules: []
-    env: concat(dotnetEnv, [
-      { name: 'Services__Teams', value: 'http://ms-teams' }
-      { name: 'Services__Notifications', value: 'http://ms-notifications' }
-    ])
+    // Se reemplaza por domainEnv en el loop (URLs con el dominio del entorno).
+    env: []
     probes: dotnetProbes
     secrets: []
   }
@@ -189,7 +215,7 @@ var allApps = [
     min: 1
     max: 5
     rules: httpScaleRule
-    // Se reemplaza por gatewayEnv en el loop (depende del dominio del entorno).
+    // Se reemplaza por domainEnv en el loop (depende del dominio del entorno).
     env: []
     probes: [
       { type: 'Liveness', httpGet: { path: '/health', port: 8080 }, periodSeconds: 10 }
@@ -206,6 +232,7 @@ var allApps = [
     min: 1
     max: 1
     rules: []
+    // Se reemplaza por domainEnv en el loop.
     env: []
     probes: []
     secrets: []
@@ -220,15 +247,14 @@ var allApps = [
     min: 1
     max: 1
     rules: []
-    env: [
-      { name: 'PROMETHEUS_URL', value: 'http://prometheus' }
-      // Referencia a Key Vault resuelta por la PLATAFORMA (sin SDK en la app).
-      { name: 'GF_SECURITY_ADMIN_PASSWORD', secretRef: 'grafana-admin-password' }
-      { name: 'GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH', value: '/var/lib/grafana/dashboards/teamforme-overview.json' }
-    ]
+    // Se reemplaza por domainEnv en el loop.
+    env: []
     probes: []
+    // Valor leído de Key Vault en el despliegue (referencia de ARM, ver main.bicep). Los entornos
+    // express no admiten secrets con keyVaultUrl (referencia resuelta en tiempo de ejecución), así
+    // que rotar esta contraseña = actualizar el secreto en Key Vault y volver a desplegar.
     secrets: [
-      { name: 'grafana-admin-password', keyVaultUrl: '${keyVaultUri}secrets/grafana-admin-password', identity: identityId }
+      { name: 'grafana-admin-password', value: grafanaAdminPassword }
     ]
   }
 ]
@@ -252,8 +278,9 @@ resource containerApps 'Microsoft.App/containerApps@2024-03-01' = [for app in ap
         external: app.external
         targetPort: app.port
         transport: 'auto'
-        // Tráfico interno por HTTP dentro del entorno (Envoy); el externo siempre por HTTPS.
-        allowInsecure: !app.external
+        // Sin allowInsecure: todo el tráfico, interno y externo, va por HTTPS (requisito de los
+        // entornos express y mejor práctica en cualquier entorno).
+        allowInsecure: false
       }
       registries: [
         { server: registryServer, identity: identityId }
@@ -266,7 +293,7 @@ resource containerApps 'Microsoft.App/containerApps@2024-03-01' = [for app in ap
           name: app.name
           image: '${registryServer}/${app.image}:${imageTag}'
           resources: { cpu: json(app.cpu), memory: app.memory }
-          env: app.name == 'gateway' ? gatewayEnv : app.env
+          env: domainEnv[?app.name] ?? app.env
           probes: app.probes
         }
       ]

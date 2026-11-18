@@ -20,6 +20,9 @@ resource vault 'Microsoft.KeyVault/vaults@2023-07-01' = {
     tenantId: subscription().tenantId
     sku: { family: 'A', name: 'standard' }
     enableRbacAuthorization: true
+    // Permite que ARM lea secretos durante un despliegue (getSecret en main.bicep) para
+    // entregarlos como secrets de Container Apps sin pasar por el pipeline.
+    enabledForTemplateDeployment: true
     enableSoftDelete: true
     softDeleteRetentionInDays: 7
     publicNetworkAccess: 'Enabled'
