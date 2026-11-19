@@ -30,10 +30,15 @@ La imagen oficial de nginx procesa `/etc/nginx/templates/*.template` con `envsub
 
 | Variable | Docker Compose | Azure Container Apps |
 |---|---|---|
-| `EVENTS_UPSTREAM` | `http://ms-events:8080` | `http://ms-events.internal.<defaultDomain>` |
-| `TEAMS_UPSTREAM` | `http://ms-teams:8080` | `http://ms-teams.internal.<defaultDomain>` |
-| `FRONTEND_UPSTREAM` | `http://frontend:4000` | `http://frontend.internal.<defaultDomain>` |
+| `EVENTS_UPSTREAM` | `http://ms-events:8080` | `https://ms-events.<defaultDomain>` |
+| `TEAMS_UPSTREAM` | `http://ms-teams:8080` | `https://ms-teams.<defaultDomain>` |
+| `FRONTEND_UPSTREAM` | `http://frontend:4000` | URL pública del frontend existente, o `https://frontend.<defaultDomain>` |
 | … | … | … |
+
+En Azure los upstreams son las **URL públicas HTTPS** de cada app: el entorno express no tiene
+descubrimiento de servicios interno ni admite `allowInsecure`. `proxy_ssl_server_name on` envía
+el SNI correcto. Los microservicios también son accesibles directamente por su URL; las rutas
+`/internal/*` quedan protegidas por la clave de Key Vault (`X-Internal-Key`).
 
 No se sobrescribe la cabecera `Host`: en Container Apps el proxy Envoy enruta por `Host`, así que
 debe llegar el nombre del upstream (comportamiento por defecto de `proxy_pass`).
@@ -50,7 +55,7 @@ la primera prueba local, con 8 de 8 llamadas a la misma réplica de ms-events.
 - **Container Apps:** el FQDN interno apunta a Envoy, que balancea (round robin) y solo envía
   tráfico a las réplicas que pasan la sonda *readiness*. Como el `resolver` de nginx no usa
   dominios de búsqueda, en Azure los upstreams son FQDN completos
-  (`http://ms-events.internal.<defaultDomain>`), calculados en `containerapps.bicep`.
+  (`https://ms-events.<defaultDomain>`), calculados en `containerapps.bicep`.
 
 ## Evolución
 Azure API Management (tier Consumption) para cuotas por cliente, claves de suscripción,

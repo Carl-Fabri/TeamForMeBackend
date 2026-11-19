@@ -29,6 +29,7 @@ Documentación de las otras soluciones:
 | 05 | [Tipos de sistemas de orquestación + Kubernetes](cloud/05-orquestacion-y-kubernetes.md) | `k8s/ms-events/`, `infra/modules/aks.bicep` |
 | 06 | [Gerenciamiento de nubes privadas y públicas](cloud/06-nubes-privadas-y-publicas.md) | `infra/`, overlays `local` vs `aks` |
 | 07 | [Máquinas virtuales](cloud/07-maquinas-virtuales.md) | `infra/modules/vm.bicep`, `vmss.bicep` |
+| 08 | [Flujo de servicios y de secretos (Key Vault)](cloud/08-flujo-de-servicios-y-key-vault.md) | `containerapps.bicep`, `keyvault.bicep`, `KeyVaultConfiguration.cs`, `InternalApiKey.cs` |
 
 ## Algoritmos de infraestructura (lanzamiento en Azure)
 | # | Algoritmo | Documento |

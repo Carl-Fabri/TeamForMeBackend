@@ -46,8 +46,8 @@ cupo no es idempotente: un reintento podría reservar dos.
 ## Configuración
 | Variable | Por defecto | Descripción |
 |---|---|---|
-| `Services__Teams` | `http://ms-teams:8080` | En Container Apps: `http://ms-teams` |
-| `Services__Notifications` | `http://ms-notifications:8080` | — |
+| `Services__Teams` | `http://ms-teams:8080` | En Container Apps: `https://ms-teams.<defaultDomain>` (URL pública: express no tiene descubrimiento interno) |
+| `Services__Notifications` | `http://ms-notifications:8080` | En Container Apps: `https://ms-notifications.<defaultDomain>` |
 | `Applications__ResolveDelaySeconds` | `6` | Tiempo hasta resolver |
 | `Internal__ApiKey` | — | Viene de Key Vault (`Internal--ApiKey`) |
 

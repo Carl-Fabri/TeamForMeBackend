@@ -26,6 +26,9 @@ param frontendUrl string = ''
 @description('Container Apps Environment existente a reutilizar (Azure for Students permite 1 por región). Vacío = crear cae-<prefix>.')
 param existingEnvironmentName string = ''
 
+@description('Revisiones múltiples en ms-events (canary). false en entornos express, que no lo admiten.')
+param multipleRevisions bool = false
+
 @secure()
 @description('Secreto compartido entre microservicios. Se guarda en Key Vault como Internal--ApiKey.')
 param internalApiKey string
@@ -46,6 +49,8 @@ param adminPublicKey string = ''
 param allowedSshCidr string = '0.0.0.0/32'
 
 var suffix = take(uniqueString(resourceGroup().id), 6)
+// Nombre calculable al inicio del despliegue: lo necesita la referencia "existing" de abajo.
+var keyVaultName = 'kv-${prefix}-${suffix}'
 
 module monitoring 'modules/monitoring.bicep' = {
   name: 'monitoring'
@@ -67,7 +72,7 @@ module keyVault 'modules/keyvault.bicep' = {
   name: 'keyvault'
   params: {
     location: location
-    name: 'kv-${prefix}-${suffix}'
+    name: keyVaultName
     readerPrincipalId: identity.outputs.principalId
     adminPrincipalId: deployerPrincipalId
     internalApiKey: internalApiKey
@@ -84,6 +89,11 @@ module registry 'modules/registry.bicep' = {
   }
 }
 
+// Referencia al vault para leer secretos en el despliegue (Key Vault reference de ARM).
+resource vault 'Microsoft.KeyVault/vaults@2023-07-01' existing = {
+  name: keyVaultName
+}
+
 module containerApps 'modules/containerapps.bicep' = if (deployApps) {
   name: 'containerapps'
   params: {
@@ -95,6 +105,9 @@ module containerApps 'modules/containerapps.bicep' = if (deployApps) {
     registryServer: registry.outputs.loginServer
     keyVaultUri: keyVault.outputs.uri
     imageTag: imageTag
+    // keyVaultUri ya hace que este módulo espere al de Key Vault: el secreto existe y está
+    // actualizado cuando ARM lo lee aquí.
+    grafanaAdminPassword: vault.getSecret('grafana-admin-password')
     frontendUrl: frontendUrl
     existingEnvironmentName: existingEnvironmentName
     grafanaAdminPassword: grafanaAdminPassword

@@ -8,6 +8,10 @@ param identityClientId string
 param registryServer string
 param keyVaultUri string
 param imageTag string
+
+@secure()
+@description('Contraseña de Grafana. main.bicep la lee de Key Vault en el despliegue (getSecret), no del pipeline.')
+param grafanaAdminPassword string
 @description('URL de un frontend ya desplegado (p. ej. https://teamforme-frontend.<dominio>). Si se indica, no se crea la app "frontend" y el gateway envía "/" a esa URL. Vacío = crear la app "frontend" en este entorno.')
 param frontendUrl string = ''
 
@@ -72,10 +76,15 @@ var httpScaleRule = [
   { name: 'http-concurrency', http: { metadata: { concurrentRequests: '30' } } }
 ]
 
-// El resolver de nginx no aplica dominios de búsqueda: el gateway necesita el FQDN interno.
+// Tráfico entre apps: HTTPS a la URL PÚBLICA de cada app (https://<app>.<dominio>).
+// El entorno que se reutiliza (el del frontend) es "express", y express no tiene descubrimiento
+// de servicios interno: las apps solo se comunican por sus URL públicas (ni http://<app> ni
+// <app>.internal.<dominio>). Por eso todas las apps tienen ingreso externo y las rutas
+// servicio a servicio (/internal/*) se protegen con la clave de Key Vault (X-Internal-Key).
 // Va fuera de "apps" porque defaultDomain solo se conoce en tiempo de despliegue y el arreglo
 // de un loop debe poder calcularse al inicio.
-var internalSuffix = 'internal.${environmentDomain}'
+func appUrl(app string, domain string) string => 'https://${app}.${domain}'
+
 var gatewayEnv = [
   { name: 'EVENTS_UPSTREAM', value: '${internalScheme}://ms-events.${internalSuffix}' }
   { name: 'TEAMS_UPSTREAM', value: '${internalScheme}://ms-teams.${internalSuffix}' }
@@ -103,22 +112,41 @@ var envOverrides = {
   grafana: grafanaEnv
 }
 
+// Variables que dependen del dominio del entorno, por app. Se aplican en el loop en lugar de
+// app.env (mismo motivo que gatewayEnv).
+var domainEnv = {
+  gateway: gatewayEnv
+  'ms-applications': concat(dotnetEnv, [
+    { name: 'Services__Teams', value: appUrl('ms-teams', environmentDomain) }
+    { name: 'Services__Notifications', value: appUrl('ms-notifications', environmentDomain) }
+  ])
+  // prometheus.aca.yml usa ${APPS_DOMAIN}; el entrypoint de la imagen lo sustituye al arrancar.
+  prometheus: [
+    { name: 'APPS_DOMAIN', value: environmentDomain }
+  ]
+  grafana: [
+    { name: 'PROMETHEUS_URL', value: appUrl('prometheus', environmentDomain) }
+    { name: 'GF_SECURITY_ADMIN_PASSWORD', secretRef: 'grafana-admin-password' }
+    { name: 'GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH', value: '/var/lib/grafana/dashboards/teamforme-overview.json' }
+  ]
+}
+
 // Catálogo de apps. minReplicas 0 = "scale to zero": sin tráfico no consume (ni cobra) CPU.
 // Los servicios con estado en memoria (teams, applications, notifications) se fijan en 1 réplica.
 //
 // ms-events es el servicio de demostración de los algoritmos de infraestructura:
-//   - revisions 'Multiple': varias revisiones activas a la vez con reparto de tráfico por
-//     pesos → despliegue canary / blue-green (scripts/azure/canary.ps1).
+//   - revisions 'Multiple' (solo con multipleRevisions=true, en un entorno estándar): varias
+//     revisiones activas a la vez con reparto de tráfico por pesos → despliegue canary /
+//     blue-green (scripts/azure/canary.ps1). En el entorno express compartido va en 'Single'.
 //   - max 10 réplicas con la regla KEDA HTTP (autoescalado: ⌈concurrentes / 30⌉).
 //   - RateLimit__*: token bucket por cliente (ráfaga 100, 50 peticiones/s).
-var multiRevisionApps = ['ms-events']
+var multiRevisionApps = multipleRevisions ? ['ms-events'] : []
 
 var allApps = [
   {
     name: 'ms-events'
     image: 'teamforme/ms-events'
     port: 8080
-    external: false
     cpu: '0.25'
     memory: '0.5Gi'
     min: 0
@@ -136,7 +164,6 @@ var allApps = [
     name: 'ms-users'
     image: 'teamforme/ms-users'
     port: 8080
-    external: false
     cpu: '0.25'
     memory: '0.5Gi'
     min: 0
@@ -150,7 +177,6 @@ var allApps = [
     name: 'ms-teams'
     image: 'teamforme/ms-teams'
     port: 8080
-    external: false
     cpu: '0.25'
     memory: '0.5Gi'
     min: 1
@@ -164,7 +190,6 @@ var allApps = [
     name: 'ms-notifications'
     image: 'teamforme/ms-notifications'
     port: 8080
-    external: false
     cpu: '0.25'
     memory: '0.5Gi'
     min: 1
@@ -178,7 +203,6 @@ var allApps = [
     name: 'ms-applications'
     image: 'teamforme/ms-applications'
     port: 8080
-    external: false
     cpu: '0.25'
     memory: '0.5Gi'
     min: 1
@@ -193,7 +217,6 @@ var allApps = [
     name: 'frontend'
     image: 'teamforme/frontend'
     port: 4000
-    external: false
     cpu: '0.5'
     memory: '1Gi'
     min: 0
@@ -210,13 +233,12 @@ var allApps = [
     name: 'gateway'
     image: 'teamforme/gateway'
     port: 8080
-    external: true
     cpu: '0.25'
     memory: '0.5Gi'
     min: 1
     max: 5
     rules: httpScaleRule
-    // Se reemplaza por gatewayEnv en el loop (depende del dominio del entorno).
+    // Se reemplaza por domainEnv en el loop (depende del dominio del entorno).
     env: []
     probes: [
       { type: 'Liveness', httpGet: { path: '/health', port: 8080 }, periodSeconds: 10 }
@@ -227,12 +249,12 @@ var allApps = [
     name: 'prometheus'
     image: 'teamforme/prometheus'
     port: 9090
-    external: false
     cpu: '0.25'
     memory: '0.5Gi'
     min: 1
     max: 1
     rules: []
+    // Se reemplaza por domainEnv en el loop.
     env: []
     probes: []
     secrets: []
@@ -241,7 +263,6 @@ var allApps = [
     name: 'grafana'
     image: 'teamforme/grafana'
     port: 3000
-    external: true
     cpu: '0.25'
     memory: '0.5Gi'
     min: 1
@@ -250,6 +271,9 @@ var allApps = [
     // Se define en grafanaEnv (depende del dominio del entorno).
     env: []
     probes: []
+    // Valor leído de Key Vault en el despliegue (referencia de ARM, ver main.bicep). Los entornos
+    // express no admiten secrets con keyVaultUrl (referencia resuelta en tiempo de ejecución), así
+    // que rotar esta contraseña = actualizar el secreto en Key Vault y volver a desplegar.
     secrets: [
       expressCompatible
         ? { name: 'grafana-admin-password', value: grafanaAdminPassword }
@@ -274,7 +298,8 @@ resource containerApps 'Microsoft.App/containerApps@2024-03-01' = [for app in ap
     configuration: {
       activeRevisionsMode: contains(multiRevisionApps, app.name) ? 'Multiple' : 'Single'
       ingress: {
-        external: app.external
+        // Externo en todas: express solo permite llamadas entre apps por la URL pública.
+        external: true
         targetPort: app.port
         transport: 'auto'
         // Tráfico interno por HTTP dentro del entorno (Envoy); el externo siempre por HTTPS.
