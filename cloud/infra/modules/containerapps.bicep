@@ -67,23 +67,23 @@ var httpScaleRule = [
   { name: 'http-concurrency', http: { metadata: { concurrentRequests: '30' } } }
 ]
 
-// Tráfico entre apps: HTTPS al FQDN interno (https://<app>.internal.<dominio>).
-// Los entornos "express" de Container Apps (como el del frontend que se reutiliza) no admiten
-// allowInsecure, así que una llamada HTTP se redirigiría (301) a HTTPS. Con el FQDN completo el
-// certificado del entorno es válido. Además el resolver de nginx no aplica dominios de búsqueda.
+// Tráfico entre apps: HTTPS a la URL PÚBLICA de cada app (https://<app>.<dominio>).
+// El entorno que se reutiliza (el del frontend) es "express", y express no tiene descubrimiento
+// de servicios interno: las apps solo se comunican por sus URL públicas (ni http://<app> ni
+// <app>.internal.<dominio>). Por eso todas las apps tienen ingreso externo y las rutas
+// servicio a servicio (/internal/*) se protegen con la clave de Key Vault (X-Internal-Key).
 // Va fuera de "apps" porque defaultDomain solo se conoce en tiempo de despliegue y el arreglo
 // de un loop debe poder calcularse al inicio.
-var internalSuffix = 'internal.${environmentDomain}'
-func internalUrl(app string, suffix string) string => 'https://${app}.${suffix}'
+func appUrl(app string, domain string) string => 'https://${app}.${domain}'
 
 var gatewayEnv = [
-  { name: 'EVENTS_UPSTREAM', value: internalUrl('ms-events', internalSuffix) }
-  { name: 'TEAMS_UPSTREAM', value: internalUrl('ms-teams', internalSuffix) }
-  { name: 'APPLICATIONS_UPSTREAM', value: internalUrl('ms-applications', internalSuffix) }
-  { name: 'USERS_UPSTREAM', value: internalUrl('ms-users', internalSuffix) }
-  { name: 'NOTIFICATIONS_UPSTREAM', value: internalUrl('ms-notifications', internalSuffix) }
+  { name: 'EVENTS_UPSTREAM', value: appUrl('ms-events', environmentDomain) }
+  { name: 'TEAMS_UPSTREAM', value: appUrl('ms-teams', environmentDomain) }
+  { name: 'APPLICATIONS_UPSTREAM', value: appUrl('ms-applications', environmentDomain) }
+  { name: 'USERS_UPSTREAM', value: appUrl('ms-users', environmentDomain) }
+  { name: 'NOTIFICATIONS_UPSTREAM', value: appUrl('ms-notifications', environmentDomain) }
   // Frontend existente (otro entorno, otro repositorio): se alcanza por su URL pública HTTPS.
-  { name: 'FRONTEND_UPSTREAM', value: useExistingFrontend ? frontendUrl : internalUrl('frontend', internalSuffix) }
+  { name: 'FRONTEND_UPSTREAM', value: useExistingFrontend ? frontendUrl : appUrl('frontend', environmentDomain) }
 ]
 
 // Variables que dependen del dominio del entorno, por app. Se aplican en el loop en lugar de
@@ -91,15 +91,15 @@ var gatewayEnv = [
 var domainEnv = {
   gateway: gatewayEnv
   'ms-applications': concat(dotnetEnv, [
-    { name: 'Services__Teams', value: internalUrl('ms-teams', internalSuffix) }
-    { name: 'Services__Notifications', value: internalUrl('ms-notifications', internalSuffix) }
+    { name: 'Services__Teams', value: appUrl('ms-teams', environmentDomain) }
+    { name: 'Services__Notifications', value: appUrl('ms-notifications', environmentDomain) }
   ])
-  // prometheus.aca.yml usa ${INTERNAL_SUFFIX}; el entrypoint de la imagen lo sustituye al arrancar.
+  // prometheus.aca.yml usa ${APPS_DOMAIN}; el entrypoint de la imagen lo sustituye al arrancar.
   prometheus: [
-    { name: 'INTERNAL_SUFFIX', value: internalSuffix }
+    { name: 'APPS_DOMAIN', value: environmentDomain }
   ]
   grafana: [
-    { name: 'PROMETHEUS_URL', value: internalUrl('prometheus', internalSuffix) }
+    { name: 'PROMETHEUS_URL', value: appUrl('prometheus', environmentDomain) }
     { name: 'GF_SECURITY_ADMIN_PASSWORD', secretRef: 'grafana-admin-password' }
     { name: 'GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH', value: '/var/lib/grafana/dashboards/teamforme-overview.json' }
   ]
@@ -121,7 +121,6 @@ var allApps = [
     name: 'ms-events'
     image: 'teamforme/ms-events'
     port: 8080
-    external: false
     cpu: '0.25'
     memory: '0.5Gi'
     min: 0
@@ -139,7 +138,6 @@ var allApps = [
     name: 'ms-users'
     image: 'teamforme/ms-users'
     port: 8080
-    external: false
     cpu: '0.25'
     memory: '0.5Gi'
     min: 0
@@ -153,7 +151,6 @@ var allApps = [
     name: 'ms-teams'
     image: 'teamforme/ms-teams'
     port: 8080
-    external: false
     cpu: '0.25'
     memory: '0.5Gi'
     min: 1
@@ -167,7 +164,6 @@ var allApps = [
     name: 'ms-notifications'
     image: 'teamforme/ms-notifications'
     port: 8080
-    external: false
     cpu: '0.25'
     memory: '0.5Gi'
     min: 1
@@ -181,7 +177,6 @@ var allApps = [
     name: 'ms-applications'
     image: 'teamforme/ms-applications'
     port: 8080
-    external: false
     cpu: '0.25'
     memory: '0.5Gi'
     min: 1
@@ -196,7 +191,6 @@ var allApps = [
     name: 'frontend'
     image: 'teamforme/frontend'
     port: 4000
-    external: false
     cpu: '0.5'
     memory: '1Gi'
     min: 0
@@ -213,7 +207,6 @@ var allApps = [
     name: 'gateway'
     image: 'teamforme/gateway'
     port: 8080
-    external: true
     cpu: '0.25'
     memory: '0.5Gi'
     min: 1
@@ -230,7 +223,6 @@ var allApps = [
     name: 'prometheus'
     image: 'teamforme/prometheus'
     port: 9090
-    external: false
     cpu: '0.25'
     memory: '0.5Gi'
     min: 1
@@ -245,7 +237,6 @@ var allApps = [
     name: 'grafana'
     image: 'teamforme/grafana'
     port: 3000
-    external: true
     cpu: '0.25'
     memory: '0.5Gi'
     min: 1
@@ -279,11 +270,12 @@ resource containerApps 'Microsoft.App/containerApps@2024-03-01' = [for app in ap
     configuration: {
       activeRevisionsMode: contains(multiRevisionApps, app.name) ? 'Multiple' : 'Single'
       ingress: {
-        external: app.external
+        // Externo en todas: express solo permite llamadas entre apps por la URL pública.
+        external: true
         targetPort: app.port
-        transport: 'auto'
-        // Sin allowInsecure: todo el tráfico, interno y externo, va por HTTPS (requisito de los
-        // entornos express y mejor práctica en cualquier entorno).
+        // Express solo admite HTTP/1.1 (sin HTTP/2 ni TCP) y no admite allowInsecure: todo va
+        // por HTTPS.
+        transport: 'http'
         allowInsecure: false
       }
       registries: [
