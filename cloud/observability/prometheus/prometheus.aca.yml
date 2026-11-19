@@ -1,11 +1,11 @@
-# Variante para Azure Container Apps. Cada target es el FQDN interno HTTPS de la app
-# (https://<app>.internal.<dominio>), que apunta al proxy Envoy del entorno: este balancea entre
-# réplicas, así que cada scrape lee UNA réplica al azar. Para métricas por réplica en Azure se usa
-# Azure Monitor (métricas de plataforma) o AKS con Managed Prometheus
-# (ver microservices/docs/cloud/04-series-temporales-y-metricas.md).
+# Variante para Azure Container Apps. Cada target es la URL pública HTTPS de la app
+# (https://<app>.<dominio>): el entorno express no tiene descubrimiento de servicios interno.
+# Esa URL apunta al proxy del entorno, que balancea entre réplicas, así que cada scrape lee UNA
+# réplica al azar. Para métricas por réplica se usa Azure Monitor (métricas de plataforma) o AKS
+# con Managed Prometheus (ver microservices/docs/cloud/04-series-temporales-y-metricas.md).
 #
-# ${INTERNAL_SUFFIX} ("internal.<dominio-del-entorno>") lo sustituye entrypoint.sh al arrancar;
-# el dominio solo se conoce al desplegar. HTTPS porque el entorno no admite allowInsecure.
+# ${APPS_DOMAIN} (dominio por defecto del entorno) lo sustituye entrypoint.sh al arrancar;
+# el dominio solo se conoce al desplegar.
 global:
   scrape_interval: 30s
   evaluation_interval: 30s
@@ -19,16 +19,16 @@ rule_files:
 scrape_configs:
   - job_name: ms-events
     scheme: https
-    static_configs: [{ targets: ["ms-events.${INTERNAL_SUFFIX}:443"] }]
+    static_configs: [{ targets: ["ms-events.${APPS_DOMAIN}:443"] }]
   - job_name: ms-teams
     scheme: https
-    static_configs: [{ targets: ["ms-teams.${INTERNAL_SUFFIX}:443"] }]
+    static_configs: [{ targets: ["ms-teams.${APPS_DOMAIN}:443"] }]
   - job_name: ms-applications
     scheme: https
-    static_configs: [{ targets: ["ms-applications.${INTERNAL_SUFFIX}:443"] }]
+    static_configs: [{ targets: ["ms-applications.${APPS_DOMAIN}:443"] }]
   - job_name: ms-users
     scheme: https
-    static_configs: [{ targets: ["ms-users.${INTERNAL_SUFFIX}:443"] }]
+    static_configs: [{ targets: ["ms-users.${APPS_DOMAIN}:443"] }]
   - job_name: ms-notifications
     scheme: https
-    static_configs: [{ targets: ["ms-notifications.${INTERNAL_SUFFIX}:443"] }]
+    static_configs: [{ targets: ["ms-notifications.${APPS_DOMAIN}:443"] }]

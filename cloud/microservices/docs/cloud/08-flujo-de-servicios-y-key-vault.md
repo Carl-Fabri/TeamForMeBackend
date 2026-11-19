@@ -7,11 +7,11 @@ ellos y cómo llega cada secreto de **Azure Key Vault** a quien lo necesita.
 
 | Servicio | Tipo | Rol | Definido en |
 |---|---|---|---|
-| Container Apps Environment | Azure (PaaS, express) | Entorno compartido con el frontend; Envoy enruta y balancea | `containerapps.bicep` (`existingEnvironmentName`) |
+| Container Apps Environment | Azure (PaaS, express) | Entorno compartido con el frontend; enruta por nombre de host y balancea entre réplicas | `containerapps.bicep` (`existingEnvironmentName`) |
 | `gateway` (nginx) | Container App **externa** | Punto de entrada único: `/api/*` a los microservicios, `/` al frontend | `cloud/gateway/` |
 | `teamforme-frontend` | Container App externa (repo TeamForMe) | Angular SSR | repositorio TeamForMe |
-| `ms-events`, `ms-teams`, `ms-applications`, `ms-users`, `ms-notifications` | Container Apps **internas** | Lógica de negocio (.NET 10) | `microservices/src/` |
-| `prometheus` | Container App interna | Base de datos de series temporales: raspa `/metrics` | `observability/prometheus/` |
+| `ms-events`, `ms-teams`, `ms-applications`, `ms-users`, `ms-notifications` | Container Apps externas (ver §4) | Lógica de negocio (.NET 10) | `microservices/src/` |
+| `prometheus` | Container App externa (ver §4) | Base de datos de series temporales: raspa `/metrics` | `observability/prometheus/` |
 | `grafana` | Container App externa | Visualización de métricas | `observability/grafana/` |
 | Identidad administrada `id-teamforme` | Microsoft Entra ID | "Cuenta de servicio" de todas las apps: lee Key Vault y descarga de ACR | `identity.bicep` |
 | **Key Vault** `kv-teamforme-<sufijo>` | Azure | Secretos `Internal--ApiKey` y `grafana-admin-password`, RBAC | `keyvault.bicep` |
@@ -21,8 +21,9 @@ ellos y cómo llega cada secreto de **Azure Key Vault** a quien lo necesita.
 
 ## 2. Flujo de una petición
 
-Todo el tráfico va por **HTTPS**, también el interno (`https://<app>.internal.<dominio>`): los
-entornos express no admiten `allowInsecure`.
+Todo el tráfico va por **HTTPS** y HTTP/1.1. Entre apps se usa la **URL pública** de cada una
+(`https://<app>.<dominio>`), porque express no tiene descubrimiento de servicios interno (§4).
+El gateway sigue siendo el único punto de entrada que usan el navegador y el frontend.
 
 ```mermaid
 flowchart LR
@@ -40,9 +41,10 @@ flowchart LR
     GW -. "/internal/* → 404" .-x X((fuera))
 ```
 
-- Las rutas `/internal/*` solo existen entre servicios: el gateway responde 404 a cualquiera
-  que las pida desde fuera, y los servicios exigen la cabecera `X-Internal-Key`.
-- Envoy (la capa de red de Container Apps) reparte las peticiones entre las réplicas de cada app.
+- Las rutas `/internal/*` solo se usan entre servicios: el gateway responde 404 a quien las
+  pida, y como los servicios también tienen URL pública, **cada servicio exige la cabecera
+  `X-Internal-Key`**, cuyo valor viene de Key Vault. Sin la clave responde 401.
+- La capa de red de Container Apps reparte las peticiones entre las réplicas de cada app.
 
 ### Postulación a un equipo (flujo principal)
 ```mermaid
@@ -125,12 +127,27 @@ y la réplica no pasa a lista. El smoke test exige `keyVault: true` con `-Expect
 
 El backend se despliega en el **mismo** entorno de Container Apps que el frontend, porque Azure
 for Students permite un solo entorno por región, y ese entorno es de tipo *express*. Express
-rechaza dos opciones que usaba la versión anterior:
+no admite varias opciones que usaba la versión anterior
+([documentación de express](https://learn.microsoft.com/azure/container-apps/express-overview)):
 
 | Error de Azure | Causa | Corrección |
 |---|---|---|
-| `ExpressAllowInsecureNotSupported` | `ingress.allowInsecure: true` en las apps internas | `allowInsecure: false` en todas. Las llamadas internas pasan a `https://<app>.internal.<dominio>` (gateway, `Services__*`, Grafana y Prometheus) |
+| `ExpressAllowInsecureNotSupported` | `ingress.allowInsecure: true` en las apps internas | `allowInsecure: false` en todas: todo va por HTTPS |
+| *(sin error en el despliegue: las llamadas fallarían después)* | Express no tiene descubrimiento de servicios interno: las apps se comunican solo por sus URL públicas | Ingreso **externo** en todas las apps. Gateway, `Services__*`, Grafana y Prometheus usan `https://<app>.<dominio>` |
+| *(express no admite HTTP/2)* | `transport: 'auto'` | `transport: 'http'` |
 | `ExpressKeyVaultSecretsNotSupported` | secret de Grafana con `keyVaultUrl` | Referencia de Key Vault **en el despliegue** (`getSecret`) en lugar de en tiempo de ejecución |
+| `ExpressMultiRevisionModeNotSupported` | `ms-events` con `activeRevisionsMode: Multiple` | `Single` por defecto. El parámetro `multipleRevisions=true` lo reactiva, pero solo funciona en un entorno estándar; `scripts/azure/canary.ps1` (canary / blue-green) también lo necesita |
+
+Si un intento anterior falló a medias, Azure puede tener una app pendiente de borrar y el
+siguiente despliegue recibe `Conflict ... pending delete operation`. Es transitorio: el job
+*Bicep · fase 2* de `infra.yml` lo reintenta hasta 3 veces, con 90 s de espera entre intentos.
 
 Prometheus necesita el dominio del entorno para sus *targets*: `containerapps.bicep` le pasa
-`INTERNAL_SUFFIX` y `observability/prometheus/entrypoint.sh` genera la configuración al arrancar.
+`APPS_DOMAIN` y `observability/prometheus/entrypoint.sh` genera la configuración al arrancar.
+
+### Riesgo de exponer los servicios y cómo se mitiga
+| Qué queda público | Mitigación |
+|---|---|
+| `/internal/*` de ms-teams y ms-notifications | Exigen `X-Internal-Key` (Key Vault) en cada petición; sin ella, 401 |
+| API pública de cada servicio (lo mismo que ya expone el gateway) | Rate limiting por cliente en los servicios (token bucket) |
+| `/metrics` de los servicios y la UI de Prometheus | Solo lectura y sin datos personales. Para cerrarlos: restricciones de IP (`ipSecurityRestrictions`, sí admitidas en express) o un entorno *workload profiles* con red virtual, que tiene descubrimiento interno |

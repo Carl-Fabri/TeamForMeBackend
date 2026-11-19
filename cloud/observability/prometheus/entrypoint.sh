@@ -1,10 +1,10 @@
 #!/bin/sh
-# Genera la configuración de Prometheus para Container Apps sustituyendo ${INTERNAL_SUFFIX}
+# Genera la configuración de Prometheus para Container Apps sustituyendo ${APPS_DOMAIN}
 # (lo define containerapps.bicep) y arranca Prometheus con los argumentos por defecto.
 set -e
-if [ -z "$INTERNAL_SUFFIX" ]; then
-  echo "Falta la variable INTERNAL_SUFFIX (internal.<dominio-del-entorno>)" >&2
+if [ -z "$APPS_DOMAIN" ]; then
+  echo "Falta la variable APPS_DOMAIN (dominio por defecto del entorno de Container Apps)" >&2
   exit 1
 fi
-sed "s|\${INTERNAL_SUFFIX}|$INTERNAL_SUFFIX|g" /etc/prometheus/prometheus.aca.yml > /prometheus/prometheus.yml
+sed "s|\${APPS_DOMAIN}|$APPS_DOMAIN|g" /etc/prometheus/prometheus.aca.yml > /prometheus/prometheus.yml
 exec /bin/prometheus --config.file=/prometheus/prometheus.yml --storage.tsdb.path=/prometheus "$@"
