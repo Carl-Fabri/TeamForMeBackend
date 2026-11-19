@@ -47,6 +47,15 @@ server {
     location = /api/users/_info         { proxy_pass $users_upstream/info; }
     location = /api/notifications/_info { proxy_pass $notifications_upstream/info; }
 
+    # Documentación de la API: especificación OpenAPI de cada servicio y página Scalar /docs.
+    location = /api/events/openapi.json        { proxy_pass $events_upstream/openapi/v1.json; }
+    location = /api/teams/openapi.json         { proxy_pass $teams_upstream/openapi/v1.json; }
+    location = /api/applications/openapi.json  { proxy_pass $applications_upstream/openapi/v1.json; }
+    location = /api/users/openapi.json         { proxy_pass $users_upstream/openapi/v1.json; }
+    location = /api/notifications/openapi.json { proxy_pass $notifications_upstream/openapi/v1.json; }
+    location = /docs  { alias /usr/share/nginx/html/docs/index.html; default_type text/html; }
+    location = /docs/ { return 301 /docs; }
+
     # Las reglas regex se evalúan en orden y gana la primera que coincide.
     # 1) Las rutas /internal/* (servicio a servicio) nunca se exponen hacia fuera.
     location ~ /internal(/|$) { return 404; }

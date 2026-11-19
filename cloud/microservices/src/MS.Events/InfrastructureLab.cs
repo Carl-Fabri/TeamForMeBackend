@@ -37,7 +37,8 @@ public static class InfrastructureLab
 
     public static WebApplication MapInfrastructureLab(this WebApplication app)
     {
-        var lab = app.MapGroup("/lab");
+        // No se publica en el gateway: queda fuera de la documentación OpenAPI/Scalar.
+        var lab = app.MapGroup("/lab").ExcludeFromDescription();
 
         // ---------------------------------------------------------------- Balanceo de carga
         lab.MapGet("/load-balancing", (string? strategy, int? requests, double? rate, int? seed) =>

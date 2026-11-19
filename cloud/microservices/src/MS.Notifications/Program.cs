@@ -12,7 +12,11 @@ var app = builder.Build();
 app.MapCloudDefaults();
 
 app.MapGet("/users/{userId}/notifications", (string userId, NotificationStore store) =>
-    Results.Ok(store.ForUser(userId)));
+    Results.Ok(store.ForUser(userId)))
+    .WithTags("Notificaciones")
+    .WithSummary("Notificaciones de un usuario")
+    .WithDescription("Avisos generados cuando sus postulaciones se resuelven, del más reciente al más antiguo.")
+    .Produces<IReadOnlyList<NotificationModel>>();
 
 var internalApi = app.MapInternalGroup();
 

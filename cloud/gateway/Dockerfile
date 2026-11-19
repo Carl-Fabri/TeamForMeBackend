@@ -1,6 +1,8 @@
 # Imagen del API Gateway. La plantilla se procesa con envsubst al iniciar el contenedor.
 FROM nginx:1.27-alpine
 COPY default.conf.template /etc/nginx/templates/default.conf.template
+# Página de documentación de la API (Scalar), servida en /docs.
+COPY docs/index.html /usr/share/nginx/html/docs/index.html
 ENV EVENTS_UPSTREAM=http://ms-events:8080 \
     TEAMS_UPSTREAM=http://ms-teams:8080 \
     APPLICATIONS_UPSTREAM=http://ms-applications:8080 \

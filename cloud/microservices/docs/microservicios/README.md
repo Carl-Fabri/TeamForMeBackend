@@ -34,6 +34,8 @@ microservices/
 | `GET /health/ready` | Readiness: ¿puede recibir tráfico? Si falla, se **saca del balanceo**. |
 | `GET /metrics` | Métricas Prometheus (HTTP, proceso .NET, negocio). |
 | `GET /info` | Servicio, **instancia** (hostname), versión, si usa Key Vault. Útil para ver el balanceo entre réplicas. |
+| `GET /openapi/v1.json` | Especificación OpenAPI 3.1 del servicio. Ver [api-scalar.md](api-scalar.md). |
+| `GET /scalar` | Referencia interactiva de Scalar del servicio. La página unificada está en el gateway: `/docs`. |
 
 ## Ejecutar un servicio de forma aislada
 

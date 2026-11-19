@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TeamForMe · API</title>
+    <style>
+      body { margin: 0; background: #08090d; }
+    </style>
+  </head>
+  <body>
+    <!--
+      Referencia de la API de TeamForMe con Scalar (modo standalone).
+      Cada microservicio publica su especificación OpenAPI y el gateway la expone en
+      /api/<servicio>/openapi.json. El primer servidor de cada especificación es /api, así que
+      "Probar" llama a la API a través de este mismo gateway.
+    -->
+    <div id="app"></div>
+    <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference@1.76.4"></script>
+    <script>
+      Scalar.createApiReference('#app', {
+        sources: [
+          { title: 'Eventos (ms-events)', slug: 'events', url: '/api/events/openapi.json', default: true },
+          { title: 'Equipos (ms-teams)', slug: 'teams', url: '/api/teams/openapi.json' },
+          { title: 'Postulaciones (ms-applications)', slug: 'applications', url: '/api/applications/openapi.json' },
+          { title: 'Usuarios (ms-users)', slug: 'users', url: '/api/users/openapi.json' },
+          { title: 'Notificaciones (ms-notifications)', slug: 'notifications', url: '/api/notifications/openapi.json' },
+        ],
+        theme: 'purple',
+        darkMode: true,
+        hideDarkModeToggle: false,
+        metaData: { title: 'TeamForMe · API' },
+      });
+    </script>
+  </body>
+</html>

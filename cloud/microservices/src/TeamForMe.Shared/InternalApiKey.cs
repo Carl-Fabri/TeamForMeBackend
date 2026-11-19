@@ -17,7 +17,8 @@ public static class InternalApiKey
 
     public static RouteGroupBuilder MapInternalGroup(this IEndpointRouteBuilder app)
     {
-        return app.MapGroup("/internal").AddEndpointFilter(async (context, next) =>
+        // Servicio a servicio: no forma parte de la API pública documentada.
+        return app.MapGroup("/internal").ExcludeFromDescription().AddEndpointFilter(async (context, next) =>
         {
             var config = context.HttpContext.RequestServices.GetRequiredService<IConfiguration>();
             // Se lee en cada petición para respetar la recarga periódica de Key Vault (rotación).

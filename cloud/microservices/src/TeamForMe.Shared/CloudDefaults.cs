@@ -19,6 +19,7 @@ namespace TeamForMe.Shared;
 ///   <item>Limitación de tasa por cliente con Token Bucket (sección <c>RateLimit</c>).</item>
 ///   <item>Apagado ordenado: al reducir réplicas (scale-in) se drenan las peticiones en curso.</item>
 ///   <item><c>/info</c> con el nombre de la instancia, para observar el balanceo entre réplicas.</item>
+///   <item>Documentación OpenAPI (<c>/openapi/v1.json</c>) y Scalar (<c>/scalar</c>).</item>
 /// </list>
 /// </summary>
 public static class CloudDefaults
@@ -29,6 +30,7 @@ public static class CloudDefaults
 
         builder.Services.AddSingleton(new ServiceIdentity(serviceName));
         builder.Services.AddProblemDetails();
+        builder.Services.AddApiDocumentation(builder.Configuration, serviceName);
 
         builder.Services.AddTokenBucketRateLimiting(builder.Configuration);
 
@@ -78,7 +80,9 @@ public static class CloudDefaults
             keyVault = !string.IsNullOrWhiteSpace(config["KeyVault:Uri"]),
             processorCount = Environment.ProcessorCount,
             startedAt = id.StartedAt,
-        }));
+        })).ExcludeFromDescription();
+
+        app.MapApiDocumentation(app.Services.GetRequiredService<ServiceIdentity>().Name);
 
         return app;
     }

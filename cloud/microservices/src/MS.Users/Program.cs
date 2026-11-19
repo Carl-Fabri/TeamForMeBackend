@@ -12,10 +12,19 @@ app.MapGet("/users/me", (HttpRequest request) =>
 {
     var id = request.Headers["X-User-Id"].FirstOrDefault() ?? UserDirectory.CurrentUserId;
     return UserDirectory.Find(id) is { } user ? Results.Ok(user) : Results.NotFound();
-});
+})
+    .WithTags("Usuarios")
+    .WithSummary("Usuario actual")
+    .WithDescription("Perfil del participante de la cabecera X-User-Id (por defecto u-1).")
+    .Produces<UserModel>()
+    .Produces(StatusCodes.Status404NotFound);
 
 app.MapGet("/users/{id}", (string id) =>
-    UserDirectory.Find(id) is { } user ? Results.Ok(user) : Results.NotFound());
+    UserDirectory.Find(id) is { } user ? Results.Ok(user) : Results.NotFound())
+    .WithTags("Usuarios")
+    .WithSummary("Obtener un usuario")
+    .Produces<UserModel>()
+    .Produces(StatusCodes.Status404NotFound);
 
 app.Run();
 
