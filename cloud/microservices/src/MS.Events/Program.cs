@@ -12,12 +12,21 @@ var app = builder.Build();
 app.MapCloudDefaults();
 app.MapInfrastructureLab(); // /lab/*: algoritmos de infraestructura (InfrastructureLab.cs)
 
-app.MapGet("/events", () => Results.Ok(EventCatalog.All));
+app.MapGet("/events", () => Results.Ok(EventCatalog.All))
+    .WithTags("Eventos")
+    .WithSummary("Listar eventos")
+    .WithDescription("Devuelve todos los eventos e ideas en búsqueda de grupo.")
+    .Produces<IReadOnlyList<EventModel>>();
 
 app.MapGet("/events/{id}", (string id) =>
     EventCatalog.All.FirstOrDefault(e => e.Id == id) is { } found
         ? Results.Ok(found)
-        : Results.NotFound());
+        : Results.NotFound())
+    .WithTags("Eventos")
+    .WithSummary("Obtener un evento")
+    .WithDescription("Detalle de un evento. Si no tiene coordenadas, `coords` es null (evento remoto).")
+    .Produces<EventModel>()
+    .Produces(StatusCodes.Status404NotFound);
 
 app.Run();
 

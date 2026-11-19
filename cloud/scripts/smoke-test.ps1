@@ -46,6 +46,9 @@ function Invoke-Api([string]$Method, [string]$Path, $Body = $null) {
         $r = Invoke-WebRequest @params
         $code = [int]$r.StatusCode
         $content = $r.Content
+        # PowerShell 7 entrega bytes cuando el Content-Type no es "texto" para él, como el
+        # application/problem+json de los errores de validación de ASP.NET (prueba 09).
+        if ($content -is [byte[]]) { $content = [System.Text.Encoding]::UTF8.GetString($content) }
     } catch [System.Net.WebException] {
         $resp = $_.Exception.Response
         if ($null -eq $resp) { return [pscustomobject]@{ Status = 0; Json = $null; Raw = $_.Exception.Message } }

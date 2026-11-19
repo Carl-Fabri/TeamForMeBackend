@@ -43,6 +43,19 @@ C:\laragon\www\TeamForMe\
 Con ambos vacíos (por ejemplo, desde `scripts/azure/deploy.ps1`), el Bicep se comporta como antes:
 crea su propio entorno y su app `frontend`.
 
+**Entorno "Express".** `teamforme-env-cus` es un entorno de Container Apps de tipo *Express*, que
+no admite `ingress.allowInsecure` (`ExpressAllowInsecureNotSupported`) ni secretos con
+`keyVaultUrl` (`ExpressKeyVaultSecretsNotSupported`). Al reutilizar un entorno existente, el Bicep
+activa un modo compatible (`expressCompatible`):
+- Las apps internas solo aceptan HTTPS. El gateway, `ms-applications` y Grafana llaman a los demás
+  por `https://<app>.internal.<dominio>`, porque con `http` Azure responde con una redirección y un
+  POST redirigido pierde el cuerpo.
+- La contraseña de Grafana se pasa como secreto de la app (el mismo valor que está en Key Vault).
+- Los microservicios .NET siguen leyendo Key Vault con su SDK y su identidad administrada.
+- Limitación conocida: la configuración de Prometheus (`observability/prometheus/prometheus.aca.yml`)
+  raspa `http://<app>:80`. Prometheus sigue la redirección a HTTPS, pero si alguna métrica no
+  aparece, ese es el primer lugar que revisar.
+
 Verificado con un *what-if* (vista previa sin aplicar cambios) del módulo con tus recursos reales:
 crea `gateway`, `grafana`, `prometheus`, `ms-events`, `ms-teams`, `ms-applications`, `ms-users` y
 `ms-notifications` en `teamforme-env-cus`, **no** crea una app `frontend` ni otro entorno, y el

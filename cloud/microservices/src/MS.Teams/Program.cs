@@ -13,10 +13,18 @@ var app = builder.Build();
 app.MapCloudDefaults();
 
 app.MapGet("/events/{eventId}/teams", (string eventId, TeamStore store) =>
-    Results.Ok(store.ByEvent(eventId).Select(TeamModel.FromState)));
+    Results.Ok(store.ByEvent(eventId).Select(TeamModel.FromState)))
+    .WithTags("Equipos")
+    .WithSummary("Equipos de un evento")
+    .WithDescription("Equipos con su aforo (filled/capacity). Los equipos privados devuelven `members: []`.")
+    .Produces<IEnumerable<TeamModel>>();
 
 app.MapGet("/teams/{teamId}", (string teamId, TeamStore store) =>
-    store.Find(teamId) is { } team ? Results.Ok(TeamModel.FromState(team)) : Results.NotFound());
+    store.Find(teamId) is { } team ? Results.Ok(TeamModel.FromState(team)) : Results.NotFound())
+    .WithTags("Equipos")
+    .WithSummary("Obtener un equipo")
+    .Produces<TeamModel>()
+    .Produces(StatusCodes.Status404NotFound);
 
 // --- API interna (servicio a servicio, protegida con X-Internal-Key desde Key Vault) ---
 var internalApi = app.MapInternalGroup();

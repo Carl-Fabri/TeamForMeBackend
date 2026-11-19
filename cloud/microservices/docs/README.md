@@ -17,6 +17,7 @@ Documentación de las otras soluciones:
   [MS.Applications](microservicios/ms-applications.md) · [MS.Users](microservicios/ms-users.md) ·
   [MS.Notifications](microservicios/ms-notifications.md)
 - [API Gateway](microservicios/gateway.md) · [Librería TeamForMe.Shared](microservicios/shared.md)
+- [Documentación de las APIs con OpenAPI y Scalar](microservicios/api-scalar.md) (página en vivo: `<gateway>/docs`)
 
 ## Conceptos cloud aplicados
 | # | Tema | Implementación principal |

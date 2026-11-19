@@ -36,13 +36,32 @@ var app = builder.Build();
 app.MapCloudDefaults();
 
 app.MapPost("/applications", (CreateApplicationInput input, HttpRequest req, TeamsClient teams, ApplicationStore store, CancellationToken ct) =>
-    ApplicationEndpoints.Create(input, req, teams, store, ct));
+    ApplicationEndpoints.Create(input, req, teams, store, ct))
+    .WithTags("Postulaciones")
+    .WithSummary("Crear una postulación")
+    .WithDescription("Reserva un cupo en el equipo `teamId` y crea la postulación en estado `pending`. Usuario: cabecera X-User-Id (por defecto u-1).")
+    .Produces<ApplicationModel>(StatusCodes.Status201Created)
+    .ProducesValidationProblem()
+    .Produces(StatusCodes.Status404NotFound)
+    .Produces(StatusCodes.Status409Conflict);
 
 app.MapPost("/teams/{teamId}/applications", (string teamId, CreateApplicationInput input, HttpRequest req, TeamsClient teams, ApplicationStore store, CancellationToken ct) =>
-    ApplicationEndpoints.Create(input with { TeamId = teamId }, req, teams, store, ct));
+    ApplicationEndpoints.Create(input with { TeamId = teamId }, req, teams, store, ct))
+    .WithTags("Postulaciones")
+    .WithSummary("Postularse a un equipo")
+    .WithDescription("Igual que `POST /applications`, con el equipo en la ruta. 409 `team_full` si no quedan cupos; a los segundos pasa a `accepted` o `rejected`.")
+    .Produces<ApplicationModel>(StatusCodes.Status201Created)
+    .ProducesValidationProblem()
+    .Produces(StatusCodes.Status404NotFound)
+    .Produces(StatusCodes.Status409Conflict);
 
 app.MapGet("/applications/{id}", (string id, ApplicationStore store) =>
-    store.Find(id) is { } found ? Results.Ok(found) : Results.NotFound());
+    store.Find(id) is { } found ? Results.Ok(found) : Results.NotFound())
+    .WithTags("Postulaciones")
+    .WithSummary("Estado de una postulación")
+    .WithDescription("Consultar periódicamente (polling) hasta que `status` deje de ser `pending`.")
+    .Produces<ApplicationModel>()
+    .Produces(StatusCodes.Status404NotFound);
 
 app.Run();
 
