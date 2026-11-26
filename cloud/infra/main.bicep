@@ -110,7 +110,7 @@ module containerApps 'modules/containerapps.bicep' = if (deployApps) {
     grafanaAdminPassword: vault.getSecret('grafana-admin-password')
     frontendUrl: frontendUrl
     existingEnvironmentName: existingEnvironmentName
-    grafanaAdminPassword: grafanaAdminPassword
+    multipleRevisions: multipleRevisions
   }
 }
 
