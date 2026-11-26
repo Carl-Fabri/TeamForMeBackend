@@ -18,20 +18,11 @@ param frontendUrl string = ''
 @description('Nombre de un Container Apps Environment existente del grupo de recursos para reutilizarlo. Azure for Students permite 1 entorno por región. Vacío = crear environmentName.')
 param existingEnvironmentName string = ''
 
-@secure()
-@description('Contraseña de Grafana. Solo se usa al reutilizar un entorno existente (ver expressCompatible).')
-param grafanaAdminPassword string = ''
+@description('Revisiones múltiples en ms-events (canary / blue-green). Los entornos express no lo admiten (ExpressMultiRevisionModeNotSupported): solo true en un entorno estándar.')
+param multipleRevisions bool = false
 
 var useExistingFrontend = !empty(frontendUrl)
 var useExistingEnvironment = !empty(existingEnvironmentName)
-
-// Al reutilizar un entorno existente se asume que puede ser "Express" (el tipo que crea el portal
-// por defecto), que no admite ingress.allowInsecure ni secretos con keyVaultUrl:
-//   - las apps internas solo aceptan HTTPS y se llaman entre sí por https://<app>.internal.<dominio>;
-//   - la contraseña de Grafana va como secreto de la app (mismo valor que en Key Vault).
-// Ambos ajustes también son válidos en un entorno normal.
-var expressCompatible = useExistingEnvironment
-var internalScheme = expressCompatible ? 'https' : 'http'
 
 resource logs 'Microsoft.OperationalInsights/workspaces@2023-09-01' existing = {
   name: logAnalyticsName
@@ -86,31 +77,14 @@ var httpScaleRule = [
 func appUrl(app string, domain string) string => 'https://${app}.${domain}'
 
 var gatewayEnv = [
-  { name: 'EVENTS_UPSTREAM', value: '${internalScheme}://ms-events.${internalSuffix}' }
-  { name: 'TEAMS_UPSTREAM', value: '${internalScheme}://ms-teams.${internalSuffix}' }
-  { name: 'APPLICATIONS_UPSTREAM', value: '${internalScheme}://ms-applications.${internalSuffix}' }
-  { name: 'USERS_UPSTREAM', value: '${internalScheme}://ms-users.${internalSuffix}' }
-  { name: 'NOTIFICATIONS_UPSTREAM', value: '${internalScheme}://ms-notifications.${internalSuffix}' }
-  // Frontend existente (otro repositorio): se alcanza por su URL pública HTTPS.
-  { name: 'FRONTEND_UPSTREAM', value: useExistingFrontend ? frontendUrl : '${internalScheme}://frontend.${internalSuffix}' }
+  { name: 'EVENTS_UPSTREAM', value: appUrl('ms-events', environmentDomain) }
+  { name: 'TEAMS_UPSTREAM', value: appUrl('ms-teams', environmentDomain) }
+  { name: 'APPLICATIONS_UPSTREAM', value: appUrl('ms-applications', environmentDomain) }
+  { name: 'USERS_UPSTREAM', value: appUrl('ms-users', environmentDomain) }
+  { name: 'NOTIFICATIONS_UPSTREAM', value: appUrl('ms-notifications', environmentDomain) }
+  // Frontend existente (otro entorno, otro repositorio): se alcanza por su URL pública HTTPS.
+  { name: 'FRONTEND_UPSTREAM', value: useExistingFrontend ? frontendUrl : appUrl('frontend', environmentDomain) }
 ]
-
-// Variables que dependen del dominio del entorno (no pueden ir dentro de "allApps").
-// En modo normal se conservan los nombres cortos por HTTP de siempre.
-var applicationsEnv = concat(dotnetEnv, [
-  { name: 'Services__Teams', value: expressCompatible ? 'https://ms-teams.${internalSuffix}' : 'http://ms-teams' }
-  { name: 'Services__Notifications', value: expressCompatible ? 'https://ms-notifications.${internalSuffix}' : 'http://ms-notifications' }
-])
-var grafanaEnv = [
-  { name: 'PROMETHEUS_URL', value: expressCompatible ? 'https://prometheus.${internalSuffix}' : 'http://prometheus' }
-  { name: 'GF_SECURITY_ADMIN_PASSWORD', secretRef: 'grafana-admin-password' }
-  { name: 'GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH', value: '/var/lib/grafana/dashboards/teamforme-overview.json' }
-]
-var envOverrides = {
-  gateway: gatewayEnv
-  'ms-applications': applicationsEnv
-  grafana: grafanaEnv
-}
 
 // Variables que dependen del dominio del entorno, por app. Se aplican en el loop en lugar de
 // app.env (mismo motivo que gatewayEnv).
@@ -208,7 +182,7 @@ var allApps = [
     min: 1
     max: 1
     rules: []
-    // Se define en applicationsEnv (depende del dominio del entorno).
+    // Se reemplaza por domainEnv en el loop (URLs con el dominio del entorno).
     env: []
     probes: dotnetProbes
     secrets: []
@@ -268,16 +242,14 @@ var allApps = [
     min: 1
     max: 1
     rules: []
-    // Se define en grafanaEnv (depende del dominio del entorno).
+    // Se reemplaza por domainEnv en el loop.
     env: []
     probes: []
     // Valor leído de Key Vault en el despliegue (referencia de ARM, ver main.bicep). Los entornos
     // express no admiten secrets con keyVaultUrl (referencia resuelta en tiempo de ejecución), así
     // que rotar esta contraseña = actualizar el secreto en Key Vault y volver a desplegar.
     secrets: [
-      expressCompatible
-        ? { name: 'grafana-admin-password', value: grafanaAdminPassword }
-        : { name: 'grafana-admin-password', keyVaultUrl: '${keyVaultUri}secrets/grafana-admin-password', identity: identityId }
+      { name: 'grafana-admin-password', value: grafanaAdminPassword }
     ]
   }
 ]
@@ -301,9 +273,10 @@ resource containerApps 'Microsoft.App/containerApps@2024-03-01' = [for app in ap
         // Externo en todas: express solo permite llamadas entre apps por la URL pública.
         external: true
         targetPort: app.port
-        transport: 'auto'
-        // Tráfico interno por HTTP dentro del entorno (Envoy); el externo siempre por HTTPS.
-        allowInsecure: !app.external && !expressCompatible
+        // Express solo admite HTTP/1.1 (sin HTTP/2 ni TCP) y no admite allowInsecure: todo va
+        // por HTTPS.
+        transport: 'http'
+        allowInsecure: false
       }
       registries: [
         { server: registryServer, identity: identityId }
@@ -316,7 +289,7 @@ resource containerApps 'Microsoft.App/containerApps@2024-03-01' = [for app in ap
           name: app.name
           image: '${registryServer}/${app.image}:${imageTag}'
           resources: { cpu: json(app.cpu), memory: app.memory }
-          env: envOverrides[?app.name] ?? app.env
+          env: domainEnv[?app.name] ?? app.env
           probes: app.probes
         }
       ]
